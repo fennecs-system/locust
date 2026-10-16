@@ -237,6 +237,7 @@ mod tests {
             cluster: String::new(),
             duplicate_of: None,
             corroboration: 0,
+            grounding: crate::model::Grounding::Verified,
         }
     }
 

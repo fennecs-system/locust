@@ -261,6 +261,14 @@ pub fn defend(
         if !f.raw.evidence.trim().is_empty() {
             let _ = writeln!(user, "\nEvidence offered:\n```\n{}\n```", f.raw.evidence.trim());
         }
+        if let Some(note) = f.grounding.note() {
+            let _ = writeln!(
+                user,
+                "\n_Automated check: {note}._ Confirm this against the file yourself — a \
+                 citation that does not hold up is the easiest refutation there is, but a \
+                 drifted line number can still sit on top of a real defect."
+            );
+        }
     }
 
     let _ = writeln!(user, "\n---\n\nAnswer every finding above. Return the JSON object only.");
@@ -381,6 +389,15 @@ pub fn judge(
             "\nClaimed severity {}, claimed altitude {}, reviewer confidence {:.2}.",
             f.raw.severity, f.raw.altitude, f.raw.confidence
         );
+        if let Some(note) = f.grounding.note() {
+            let _ = writeln!(
+                user,
+                "\n**Automated citation check: {note}.** This was checked mechanically against \
+                 the target revision, so it is fact rather than argument. Weigh it as evidence \
+                 about how carefully this reviewer read, not as an automatic refutation: the \
+                 underlying defect may still be real and described in the wrong place."
+            );
+        }
         if f.corroboration > 1 {
             let _ = writeln!(
                 user,

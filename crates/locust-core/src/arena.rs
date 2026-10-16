@@ -80,7 +80,8 @@ impl Arena {
         let mut providers = Vec::new();
         for pc in cfg.active_providers() {
             providers.push(
-                pc.build().with_context(|| format!("configuring provider `{}`", pc.name))?,
+                pc.build_with(&cfg.sandbox)
+                    .with_context(|| format!("configuring provider `{}`", pc.name))?,
             );
         }
         Self::with_providers(cfg, vcs, providers, report)
@@ -422,7 +423,27 @@ impl Arena {
                 ),
             });
         }
+        // Check every citation against the real file before anyone argues
+        // about it, so the defender and the judge can both see when a reviewer
+        // quoted code that is not there.
+        crate::grounding::verify(
+            self.vcs.as_ref(),
+            &pack.range.target,
+            &pack.files,
+            &mut findings,
+        );
         crate::dedup::cluster(&mut findings);
+
+        let ungrounded = findings.iter().filter(|f| !f.grounding.is_sound()).count();
+        if ungrounded > 0 {
+            (self.report)(Event::Warning {
+                message: format!(
+                    "{ungrounded} of {} findings cite code that could not be located in the \
+                     target revision; they are marked for the defenders and the panel",
+                    findings.len()
+                ),
+            });
+        }
         (self.report)(Event::PhaseFinished { generation, phase: "attack", count: findings.len() });
 
         let rebuttals = {
@@ -581,6 +602,7 @@ impl Arena {
                         cluster: String::new(),
                         duplicate_of: None,
                         corroboration: 1,
+                        grounding: Grounding::Unchecked,
                     })
                     .collect();
 

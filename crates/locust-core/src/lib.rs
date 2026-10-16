@@ -22,6 +22,7 @@ pub mod config;
 pub mod context;
 pub mod dedup;
 pub mod evolution;
+pub mod grounding;
 pub mod model;
 pub mod prompts;
 pub mod report;

@@ -216,6 +216,39 @@ fn render(found: &Detected) -> String {
     );
 
     s.push_str(
+        "\n# --- sandbox -----------------------------------------------------------\n\
+         #\n\
+         # locust implements no sandboxing of its own, deliberately. Containers, microVMs,\n\
+         # cgroups and jails are a different layer of concern with mature tools already\n\
+         # solving them, and a half-built sandbox is worse than an obvious absence of one\n\
+         # because it invites misplaced trust.\n\
+         #\n\
+         # What locust does is compose. `command` is a prefix argv that the agent command\n\
+         # is appended to, so the result is whatever you already run. {workspace} is the\n\
+         # agent's private checkout and {id} its label.\n\
+         #\n\
+         # [sandbox]\n\
+         # command = [\"docker\", \"run\", \"--rm\", \"--network=none\",\n\
+         #            \"-v\", \"{workspace}:/w\", \"-w\", \"/w\", \"locust-agent\"]\n\
+         #\n\
+         # Equally:\n\
+         #   systemd-run --scope -p MemoryMax=2G -p CPUQuota=200% --\n\
+         #   nix develop /etc/nixos#agent -c\n\
+         #   bwrap --ro-bind / / --bind {workspace} {workspace} --unshare-net --\n\
+         #   firecracker-run --rootfs agent.ext4 --mount {workspace} --\n\
+         #\n\
+         # Only CLI providers spawn processes, so only they are affected. A provider can\n\
+         # set `sandbox = false` to opt out if it is already isolated by other means, or\n\
+         # needs something the sandbox denies.\n\
+         #\n\
+         # Prompt text is never interpolated into this argv -- only {workspace}, {id} and\n\
+         # {model} are -- so a model cannot inject arguments into your container command.\n\
+         #\n\
+         # An agent still needs whatever credentials its CLI authenticates with, so a\n\
+         # sandbox that blocks the network blocks the agent: allow the API host only.\n\n",
+    );
+
+    s.push_str(
         "\n# --- judges ------------------------------------------------------------\n\
          #\n\
          # Judges have temperament, expressed as Big Five (OCEAN) traits in 0.0-1.0.\n\

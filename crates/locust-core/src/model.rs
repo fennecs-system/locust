@@ -171,6 +171,67 @@ pub struct Finding {
     /// across vendors is the main thing multiple providers buys you.
     #[serde(default)]
     pub corroboration: usize,
+    /// Whether the code this finding cites actually exists as described.
+    #[serde(default)]
+    pub grounding: Grounding,
+}
+
+/// Result of checking a finding's citation against the target revision.
+///
+/// Not a verdict on the finding: a drifted line number often accompanies a
+/// real defect. It is evidence about how carefully the reviewer read, handed
+/// to the defender and the judge so they can weigh it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum Grounding {
+    /// Not checked — no revision was available to check against.
+    #[default]
+    Unchecked,
+    /// The cited file, line and quoted code all hold up.
+    Verified,
+    /// The cited path does not exist at the target revision and was not
+    /// deleted by the change.
+    FileNotFound,
+    /// The cited line is past the end of the file, or is zero.
+    LineOutOfRange { cited: u32, file_lines: usize },
+    /// None of the substantial lines the reviewer quoted appear in the file.
+    EvidenceNotFound { quoted_lines: usize },
+}
+
+impl Grounding {
+    pub fn is_sound(self) -> bool {
+        matches!(self, Grounding::Verified | Grounding::Unchecked)
+    }
+
+    /// One line for a prompt or a report, or `None` when there is nothing to
+    /// say.
+    pub fn note(self) -> Option<String> {
+        match self {
+            Grounding::Verified | Grounding::Unchecked => None,
+            Grounding::FileNotFound => Some(
+                "the cited file does not exist at this revision and was not deleted by this change"
+                    .into(),
+            ),
+            Grounding::LineOutOfRange { cited, file_lines } => Some(format!(
+                "cites line {cited}, but the file is {file_lines} lines long"
+            )),
+            Grounding::EvidenceNotFound { quoted_lines } => Some(format!(
+                "none of the {quoted_lines} line(s) of code quoted as evidence appear in the file"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for Grounding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Grounding::Unchecked => f.write_str("unchecked"),
+            Grounding::Verified => f.write_str("verified"),
+            Grounding::FileNotFound => f.write_str("file not found"),
+            Grounding::LineOutOfRange { .. } => f.write_str("line out of range"),
+            Grounding::EvidenceNotFound { .. } => f.write_str("evidence not found"),
+        }
+    }
 }
 
 impl Finding {
@@ -577,6 +638,9 @@ pub struct Fitness {
     pub refuted: usize,
     pub undecided: usize,
     pub duplicates: usize,
+    /// Findings whose citation could not be located in the target revision.
+    #[serde(default)]
+    pub ungrounded: usize,
     /// confirmed / (confirmed + refuted); the share of claims that survived.
     pub precision: f64,
     pub mean_altitude: f64,

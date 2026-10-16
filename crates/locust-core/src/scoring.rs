@@ -45,6 +45,14 @@ pub fn score_generation(
         let Some(&i) = index.get(f.persona_id.as_str()) else { continue };
         out[i].raised += 1;
 
+        // Charged whatever the verdict: citing code that is not there is a
+        // failure of reading, and a reviewer should not break even on it just
+        // because the defect it gestured at happened to be real.
+        if !f.grounding.is_sound() {
+            out[i].ungrounded += 1;
+            out[i].score += cfg.ungrounded_penalty;
+        }
+
         // A duplicate is not judged separately — the judge ruled on the
         // canonical member — but it inherits that verdict. Independently
         // rediscovering something true is worth a little; independently making
@@ -174,6 +182,7 @@ mod tests {
             cluster: id.into(),
             duplicate_of: None,
             corroboration: 1,
+            grounding: crate::model::Grounding::Verified,
         }
     }
 
@@ -357,6 +366,38 @@ mod tests {
             0.5,
         );
         assert_eq!(split[0].score, unanimous[0].score);
+    }
+
+    #[test]
+    fn an_unsubstantiated_citation_is_free_until_you_ask_for_it_to_cost() {
+        use crate::model::Grounding;
+        let ps = vec![persona("p")];
+        let mut f = finding("f1", "p", Altitude::Local);
+        f.grounding = Grounding::EvidenceNotFound { quoted_lines: 3 };
+        let findings = vec![f];
+        let rulings = vec![ruling("f1", Verdict::Confirmed, Altitude::Local)];
+
+        // Off by default: the defender and panel already see the check, and a
+        // refuted finding is charged through `refuted`.
+        let off = ScoringConfig::default();
+        let base = score_generation(&off, &ps, &findings, &rulings, 0.5);
+        assert_eq!(base[0].ungrounded, 1, "still counted and reported");
+
+        let on = ScoringConfig { ungrounded_penalty: -2.0, ..ScoringConfig::default() };
+        let charged = score_generation(&on, &ps, &findings, &rulings, 0.5);
+        assert!(charged[0].score < base[0].score);
+        assert!((base[0].score - charged[0].score - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sound_citation_is_never_charged() {
+        let cfg = ScoringConfig { ungrounded_penalty: -5.0, ..ScoringConfig::default() };
+        let ps = vec![persona("p")];
+        let findings = vec![finding("f1", "p", Altitude::Local)];
+        let rulings = vec![ruling("f1", Verdict::Confirmed, Altitude::Local)];
+        let scores = score_generation(&cfg, &ps, &findings, &rulings, 0.5);
+        assert_eq!(scores[0].ungrounded, 0);
+        assert!(scores[0].score > 0.0);
     }
 
     #[test]

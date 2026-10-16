@@ -93,6 +93,13 @@ pub trait Vcs: Send + Sync {
     /// Unified diff between two revisions.
     fn diff(&self, base: &str, target: &str) -> Result<String>;
 
+    /// Unified diff restricted to `paths`.
+    ///
+    /// Exclusions have to be applied here rather than only to the file list:
+    /// a lockfile or a vendored tree that is excluded from review must not
+    /// reach a provider inside the diff text either.
+    fn diff_paths(&self, base: &str, target: &str, paths: &[String]) -> Result<String>;
+
     fn changed_files(&self, base: &str, target: &str) -> Result<Vec<ChangedFile>>;
 
     /// Contents of `path` at `rev`, or `None` if it does not exist there.

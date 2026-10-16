@@ -27,7 +27,11 @@ impl ContextPack {
         let files: Vec<ChangedFile> =
             all.into_iter().filter(|f| !is_excluded(&f.path, &cfg.exclude)).collect();
 
-        let diff = vcs.diff(&range.merge_base, &range.target)?;
+        // Scoped to the surviving paths, so an excluded file is absent from
+        // the diff as well as from the file list. Filtering only the list would
+        // still ship the contents of every excluded file to every provider.
+        let included: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+        let diff = vcs.diff_paths(&range.merge_base, &range.target, &included)?;
 
         let mut sources = Vec::new();
         let mut truncated = Vec::new();

@@ -189,6 +189,34 @@ jump in finding quality this tool offers, and `locust init` writes the exact
 line to uncomment. It is opt-in because the agent runs with your credentials
 and network access, disposable worktree or not.
 
+## Sandboxing
+
+locust implements none, deliberately. Containers, microVMs, cgroups and jails
+are a different layer of concern with mature tools already solving them, and a
+half-built sandbox is worse than an obvious absence of one because it invites
+misplaced trust.
+
+What locust does is compose. `[sandbox] command` is a prefix argv that the agent
+command is appended to:
+
+```toml
+[sandbox]
+command = ["docker", "run", "--rm", "--network=none",
+           "-v", "{workspace}:/w", "-w", "/w", "locust-agent"]
+```
+
+`{workspace}` is the agent's private checkout and `{id}` its label. The same
+shape covers `systemd-run --scope -p MemoryMax=2G --`, `nix develop ... -c`,
+`bwrap --unshare-net --`, a Firecracker wrapper script, or anything else that
+takes a command as its tail. Only CLI providers spawn processes, so only they
+are affected; a provider can opt out with `sandbox = false`.
+
+Two things worth knowing. Prompt text is **never** interpolated into the
+wrapper argv — only `{workspace}`, `{id}` and `{model}` are, so a model cannot
+inject arguments into your container invocation. And an agent still needs the
+credentials its CLI authenticates with, so a sandbox that blocks the network
+blocks the agent: allow the API host and nothing else.
+
 ## Isolation
 
 Each agent that needs a filesystem gets its own checkout at the target revision,

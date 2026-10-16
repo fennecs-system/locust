@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use locust_core::arena::{Arena, Event};
 use locust_core::config::{Config, ProviderConfig, ProviderKind};
-use locust_core::model::{Altitude, Role, Severity, Verdict};
+use locust_core::model::{Altitude, Grounding, Role, Severity, Verdict};
 use locust_provider::{Provider, Request, Response, Usage};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,7 +33,18 @@ fn fixture_repo() -> Result<PathBuf> {
     git(&dir, &["config", "user.email", "t@example.com"])?;
     git(&dir, &["config", "user.name", "Test"])?;
 
-    std::fs::write(dir.join("src/pool.rs"), "pub fn take() -> u32 {\n    0\n}\n")?;
+    // Long enough that the line numbers the scripted reviewers cite are real.
+    // Findings here are checked against the file like any other, so a fixture
+    // citing line 180 of a 7-line file would (correctly) be reported as
+    // ungrounded and the tests would be measuring the wrong thing.
+    let filler = (0..200)
+        .map(|i| format!("    let _spacer_{i} = {i};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        dir.join("src/pool.rs"),
+        format!("pub fn take() -> u32 {{\n    0\n{filler}\n}}\n"),
+    )?;
     git(&dir, &["add", "-A"])?;
     git(&dir, &["commit", "-qm", "initial"])?;
 
@@ -41,7 +52,9 @@ fn fixture_repo() -> Result<PathBuf> {
     git(&dir, &["checkout", "-q", "-b", "feature"])?;
     std::fs::write(
         dir.join("src/pool.rs"),
-        "pub fn take() -> u32 {\n    let n = compute();\n    n * 2\n}\n\nfn compute() -> u32 {\n    7\n}\n",
+        format!(
+            "pub fn take() -> u32 {{\n    let n = compute();\n    n * 2\n{filler}\n}}\n\nfn compute() -> u32 {{\n    7\n}}\n"
+        ),
     )?;
     git(&dir, &["add", "-A"])?;
     git(&dir, &["commit", "-qm", "change"])?;
@@ -850,6 +863,98 @@ async fn a_first_generation_failing_entirely_is_still_fatal() -> Result<()> {
     let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
     let err = arena.run().await.unwrap_err().to_string();
     assert!(err.contains("every reviewer failed"), "got: {err}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// A reviewer under pressure to produce findings will cite a line past the end
+/// of the file, or quote code it composed rather than read. Those findings read
+/// exactly like real ones, so the citation is checked mechanically and the
+/// result put in front of the defender and the panel.
+#[tokio::test]
+async fn a_finding_citing_code_that_does_not_exist_is_marked() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 2, &["alpha"]);
+
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![
+            // Real line in a real file.
+            ("src/pool.rs", 2, "a grounded defect in the change", "local"),
+            // A file the change never touched and which does not exist.
+            ("src/imaginary.rs", 5, "a defect in a file that is not there", "local"),
+            // Real file, line far past its end.
+            ("src/pool.rs", 99999, "a defect at an impossible line", "local"),
+        ],
+    ));
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], reporter)?;
+    let outcome = arena.run().await?;
+    let findings = &outcome.generations[0].findings;
+
+    let by_file = |name: &str, line: u32| {
+        findings
+            .iter()
+            .find(|f| f.raw.file == name && f.raw.line == Some(line))
+            .unwrap_or_else(|| panic!("no finding for {name}:{line}"))
+    };
+
+    assert_eq!(by_file("src/pool.rs", 2).grounding, Grounding::Verified);
+    assert_eq!(by_file("src/imaginary.rs", 5).grounding, Grounding::FileNotFound);
+    assert!(matches!(
+        by_file("src/pool.rs", 99999).grounding,
+        Grounding::LineOutOfRange { cited: 99999, .. }
+    ));
+
+    // The reviewer's scorecard records it, and the run says so out loud.
+    let fitness: usize = outcome.generations[0].fitness.iter().map(|f| f.ungrounded).sum();
+    assert!(fitness >= 2, "ungrounded findings are counted against their author");
+    assert!(
+        warnings.lock().unwrap().iter().any(|w| w.contains("could not be located")),
+        "the run must say that citations failed to resolve"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// Exclusions have to remove content from the diff text, not just from the
+/// file list -- otherwise an excluded lockfile or vendored tree is still
+/// shipped to every provider inside the diff.
+#[tokio::test]
+async fn excluded_files_are_absent_from_the_diff_itself() -> Result<()> {
+    let repo = fixture_repo()?;
+    std::fs::write(repo.join("secrets.env"), "API_TOKEN=hunter2-do-not-leak\n")?;
+    std::fs::write(repo.join("Cargo.lock"), "name = \"generated\"\n")?;
+    git(&repo, &["add", "-A"])?;
+    git(&repo, &["commit", "-qm", "add excluded files"])?;
+
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut ctx = locust_core::config::ContextConfig::default();
+    ctx.exclude.push("secrets.env".into());
+
+    let range = vcs.range("main", "HEAD")?;
+    let pack = locust_core::context::ContextPack::build(vcs.as_ref(), &range, &ctx)?;
+
+    assert!(!pack.files.iter().any(|f| f.path == "secrets.env"), "excluded from the file list");
+    assert!(!pack.diff.contains("hunter2-do-not-leak"), "secret leaked in the diff text");
+    assert!(!pack.diff.contains("secrets.env"), "excluded path leaked in the diff text");
+    assert!(!pack.diff.contains("Cargo.lock"), "default exclusion leaked");
+
+    // And nothing about it survives into what agents are actually shown.
+    let rendered = pack.render(true);
+    assert!(!rendered.contains("hunter2-do-not-leak"));
+    assert!(rendered.contains("src/pool.rs"), "the real change is still there");
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())

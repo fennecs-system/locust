@@ -40,6 +40,53 @@ pub struct Config {
     pub personas: Vec<PersonaConfig>,
     #[serde(default, rename = "judge")]
     pub judges: Vec<JudgeConfig>,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+/// How to run agent processes inside somebody else's isolation.
+///
+/// locust deliberately implements no sandboxing of its own. Containers,
+/// microVMs, cgroups and jails are a different layer of concern with mature
+/// tools already solving them, and a half-built sandbox is worse than an
+/// obvious absence of one because it invites misplaced trust.
+///
+/// What locust does is compose: `command` is a prefix argv that the agent
+/// command is appended to, so the result is whatever you already use —
+///
+/// ```toml
+/// [sandbox]
+/// command = ["docker", "run", "--rm", "--network=none",
+///            "-v", "{workspace}:/w", "-w", "/w", "locust-agent"]
+/// ```
+///
+/// and equally `firecracker`, `systemd-run --scope -p MemoryMax=2G`,
+/// `nix develop -c`, `bwrap`, or a shell script of your own. Only CLI
+/// providers spawn processes, so only they are affected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Prefix argv. Empty means agents run directly, with no isolation beyond
+    /// their own worktree.
+    pub command: Vec<String>,
+    /// Set false to keep the configuration but run without it.
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+}
+
+impl SandboxConfig {
+    /// The wrapper to apply, or empty when agents should run directly.
+    pub fn wrapper(&self) -> &[String] {
+        if self.enabled {
+            &self.command
+        } else {
+            &[]
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.wrapper().is_empty()
+    }
 }
 
 /// Five optional floats in `0.0..=1.0`, flattened into whatever declares them.
@@ -290,6 +337,16 @@ pub struct ScoringConfig {
     /// that backed it. With a single judge there is never any dissent, so this
     /// does nothing until you run a panel.
     pub consensus_weight: f64,
+    /// Extra cost for a finding whose citation could not be located in the
+    /// target revision — a line past the end of the file, a path that is not
+    /// there, or quoted code that does not appear in it.
+    ///
+    /// Defaults to `0.0`, i.e. off. The citation check is already shown to the
+    /// defenders and the panel, and a fabricated citation is the easiest thing
+    /// in the world for a defender to refute, which costs the reviewer through
+    /// `refuted` already. Turn this on to charge for it a second time, directly
+    /// and regardless of the verdict.
+    pub ungrounded_penalty: f64,
 }
 
 impl Default for ScoringConfig {
@@ -303,6 +360,7 @@ impl Default for ScoringConfig {
             stale_penalty: -1.0,
             severity_weighted: true,
             consensus_weight: 0.5,
+            ungrounded_penalty: 0.0,
         }
     }
 }
@@ -399,6 +457,11 @@ pub struct ProviderConfig {
     pub stdin: Option<String>,
     #[serde(default)]
     pub usage_path: Option<String>,
+    /// Run this provider outside the `[sandbox]` wrapper. For a provider that
+    /// is already isolated by other means, or one that must reach something
+    /// the sandbox denies.
+    #[serde(default)]
+    pub sandbox: Option<bool>,
 
     // --- shared ---
     #[serde(default)]
@@ -444,6 +507,12 @@ impl ProviderConfig {
     /// Instantiate. Fails loudly on a missing key or an unknown preset so a
     /// run does not silently proceed with half its population.
     pub fn build(&self) -> Result<SharedProvider> {
+        self.build_with(&SandboxConfig::default())
+    }
+
+    /// Instantiate, running CLI agents inside `sandbox` unless this provider
+    /// opted out.
+    pub fn build_with(&self, sandbox: &SandboxConfig) -> Result<SharedProvider> {
         let settings = self.settings();
         match self.kind {
             ProviderKind::Api => {
@@ -493,6 +562,7 @@ impl ProviderConfig {
                         extract: Extract::Raw,
                         usage_path: None,
                         env: HashMap::new(),
+                        wrapper: Vec::new(),
                     },
                 };
                 // Explicit fields override the preset.
@@ -509,6 +579,10 @@ impl ProviderConfig {
                     spec.usage_path = self.usage_path.clone();
                 }
                 spec.env.extend(self.env.clone());
+
+                if self.sandbox.unwrap_or(true) {
+                    spec.wrapper = sandbox.wrapper().to_vec();
+                }
 
                 if spec.command.is_empty() {
                     bail!("provider `{}`: set `preset` or `command`", self.name);
@@ -678,6 +752,12 @@ impl Config {
         for p in &self.personas {
             p.to_persona(0)?;
         }
+        if self.sandbox.enabled && self.sandbox.command.len() == 1 {
+            bail!(
+                "[sandbox] command has only one element; it must be the full argv the agent \
+                 command is appended to, e.g. [\"docker\", \"run\", \"--rm\", \"image\"]"
+            );
+        }
         if self.arena.attackers == 0 {
             bail!("[arena] attackers must be at least 1");
         }
@@ -759,6 +839,7 @@ mod tests {
             command: None,
             stdin: None,
             usage_path: None,
+            sandbox: None,
             max_tokens: None,
             temperature: None,
             timeout_secs: None,

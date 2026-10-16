@@ -70,6 +70,10 @@ impl Vcs for JjVcs {
         self.git.diff(base, target)
     }
 
+    fn diff_paths(&self, base: &str, target: &str, paths: &[String]) -> Result<String> {
+        self.git.diff_paths(base, target, paths)
+    }
+
     fn changed_files(&self, base: &str, target: &str) -> Result<Vec<ChangedFile>> {
         self.git.changed_files(base, target)
     }
