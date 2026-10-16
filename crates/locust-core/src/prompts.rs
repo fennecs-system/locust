@@ -100,6 +100,22 @@ pub struct Prompt {
     pub user: String,
 }
 
+/// Build an attacker's prompt for one generation.
+///
+/// Composed in a fixed order so the pieces cannot fight each other: the
+/// persona's own prose first, then its temperament, then the rules every
+/// attacker obeys, then the output schema. The persona says *what* to hunt and
+/// the rules say *what counts as a finding*; putting the rules last means a
+/// persona cannot talk its way out of needing falsifiable claims.
+///
+/// `settled` is every finding earlier generations already argued out, handed
+/// over as a do-not-raise list. Together with `pressure` — which drives the
+/// altitude directive — this is what stops later generations re-reporting the
+/// same easy defects.
+///
+/// `has_workspace` switches the context pack between carrying full file
+/// contents (for API providers, which cannot open anything) and telling the
+/// agent to go read the repository itself.
 pub fn attack(
     persona: &Persona,
     pack: &ContextPack,
@@ -200,6 +216,15 @@ const REBUTTAL_SCHEMA: &str = r#"Respond with JSON only:
 
 Include an entry for every finding you were given."#;
 
+/// Build a defender's prompt for one batch of findings.
+///
+/// Defenders are scored on refutations the judge agrees with, so the rules
+/// push hard against bluffing: conceding a true finding is free, and an
+/// unsupported "this is handled upstream" costs credibility on every other
+/// rebuttal in the same response.
+///
+/// Batching matters. A defender given forty findings skims; one given eight
+/// reasons. The batch size is `[arena] judge_batch`.
 pub fn defend(
     persona: &Persona,
     pack: &ContextPack,
@@ -300,6 +325,18 @@ const RULING_SCHEMA: &str = r#"Respond with JSON only:
 
 Rule on every finding you were given, exactly once each."#;
 
+/// Build one judge's prompt for a batch of contested findings.
+///
+/// The judge never learns who raised what, or which model did — authorship is
+/// stripped from the case file because models prefer their own output and
+/// would otherwise be grading a vendor rather than a claim.
+///
+/// Each judge on the panel gets an identical case file and is not told the
+/// others exist. That is deliberate: the panel's value is three independent
+/// readings, and a judge that knew it was one of three could defer ("the
+/// others will catch it") or posture. Their temperament is appended *after*
+/// the shared rules, so it reads as calibration applied to a common standard
+/// rather than a different job.
 pub fn judge(
     pack: &ContextPack,
     cases: &[(&Finding, Vec<&Rebuttal>)],
@@ -397,6 +434,17 @@ person, addressed to the reviewer. Do not include output-format instructions, \
 JSON schemas, or generic advice about being careful — those are supplied \
 separately. 120-250 words.";
 
+/// Build the meta-prompt that rewrites one reviewer's prose.
+///
+/// The reviewer's system prompt is its genome, and this is the mutation
+/// operator. It is given the persona's own scorecard and the specific claims
+/// that were confirmed or refuted, so the rewrite is argued from evidence
+/// rather than taste — a high refutation rate means "narrow it to where it was
+/// right", not "try harder".
+///
+/// Temperament is deliberately *not* in scope here: traits are inherited
+/// unchanged so a reviewer calibrated by hand keeps that calibration across
+/// generations instead of drifting under selection.
 pub fn mutate(persona: &Persona, fitness: &Fitness, evidence: &str, pressure: f64) -> Prompt {
     let mut user = String::new();
     let _ = writeln!(user, "## Reviewer: {}\n", persona.name);
@@ -454,6 +502,12 @@ Write it in second person, addressed to the reviewer, with its own distinct \
 voice. No output-format instructions or JSON schemas — those are supplied \
 separately. 120-250 words.";
 
+/// Build the meta-prompt that breeds one reviewer from two winners.
+///
+/// The instruction is to find where the two parents' concerns *intersect* and
+/// make that the child's obsession, rather than summarising both. A prompt
+/// that hunts everything finds nothing, and the population already has other
+/// reviewers covering other ground.
 pub fn crossover(a: &(Persona, Fitness), b: &(Persona, Fitness)) -> Prompt {
     let mut user = String::new();
     for (p, f) in [a, b] {
@@ -495,6 +549,15 @@ Be willing to say the change is sound: if the confirmed findings are all minor \
 and unrelated, report them plainly as a short list rather than inventing a \
 narrative that connects them.";
 
+/// Build the final pass that turns surviving findings into themes.
+///
+/// This is the step that produces what an engineer actually reads. Individual
+/// findings are symptoms; three confirmed findings about forgotten cleanup in
+/// three error paths are one issue about where this code puts its cleanup.
+///
+/// Where the run used a panel, each finding carries its tally, so a theme
+/// resting mostly on contested findings can be reported as contested instead
+/// of being presented as settled.
 pub fn synthesize(
     pack: &ContextPack,
     confirmed: &[(&Finding, &Ruling)],
@@ -569,7 +632,10 @@ fn temperament(rendered: &str) -> String {
     }
 }
 
-/// Whether this agent should be given a worktree.
+/// Whether this agent should be given its own checkout, honouring
+/// `[run] workspaces`. Under `auto`, only providers that can actually use one
+/// get one — handing a worktree to an HTTP provider costs a `git worktree add`
+/// and buys nothing.
 pub fn wants_workspace(cfg: &Config, provider_needs: bool) -> bool {
     match cfg.run.workspaces {
         crate::config::WorkspacePolicy::Always => true,

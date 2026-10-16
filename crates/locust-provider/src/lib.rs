@@ -80,11 +80,17 @@ pub struct Response {
     pub model: String,
 }
 
+/// A way of getting a completion out of a model.
+///
+/// Implementations must be safe to call concurrently and from many tasks at
+/// once: the arena runs dozens of agents in parallel against a single instance
+/// of each provider.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Name as written in `locust.toml`, e.g. `anthropic`.
     fn name(&self) -> &str;
 
+    /// Model identifier, for reports and cost accounting.
     fn model(&self) -> &str;
 
     /// Whether this provider wants its own checkout. True for agentic CLIs.
@@ -92,6 +98,9 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Run one request to completion. Implementations own their own retry
+    /// policy; the arena treats an error here as that agent failing, which
+    /// shrinks the population for that phase rather than aborting the run.
     async fn complete(&self, req: Request) -> Result<Response>;
 }
 

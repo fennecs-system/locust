@@ -71,7 +71,14 @@ pub struct ReviewRange {
     pub merge_base: String,
 }
 
+/// Read access to the repository under review, plus disposable checkouts for
+/// agents that need to explore it.
+///
+/// Implementations must tolerate concurrent calls — workspace creation in
+/// particular, which the arena drives from many tasks at once and which is not
+/// safe to run in parallel against a single git index.
 pub trait Vcs: Send + Sync {
+    /// Backend name, for reports: `git` or `jj`.
     fn kind(&self) -> &'static str;
 
     /// Absolute path of the main repository.
