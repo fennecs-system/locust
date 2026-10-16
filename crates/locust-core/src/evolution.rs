@@ -300,7 +300,7 @@ fn dedupe_ids(personas: &mut [Persona]) {
 
 async fn call_meta(
     meta: &SharedProvider,
-    prompt: &prompts::AttackPrompt,
+    prompt: &prompts::Prompt,
     label: &str,
 ) -> Result<(PersonaSpec, Usage)> {
     let resp = meta

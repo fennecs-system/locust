@@ -32,6 +32,9 @@ pub enum Event {
     },
     Breeding { generation: u32 },
     Synthesizing,
+    /// Something that undermines the validity of the run's verdicts, raised
+    /// while there is still time to act on it.
+    Warning { message: String },
     BudgetReached { spent: f64, budget: f64 },
     RunFinished { run_id: String, usage: Usage },
 }
@@ -139,6 +142,10 @@ impl Arena {
             generations: total,
         });
 
+        for message in self.validity_warnings() {
+            (self.report)(Event::Warning { message });
+        }
+
         self.store.write_text("config.toml", &toml::to_string_pretty(&self.cfg)?)?;
         self.store.write_text("context.md", &pack.render(true))?;
 
@@ -177,6 +184,27 @@ impl Arena {
                         verdict: ruling.raw.verdict,
                     });
                 }
+            }
+
+            let confirmed = outcome.confirmed().count();
+            let refuted = outcome
+                .rulings
+                .iter()
+                .filter(|r| r.raw.verdict == Verdict::Refuted)
+                .count();
+            // A judge that refutes nothing is not discriminating, it is
+            // rubber-stamping -- and every fitness score that generation is
+            // measuring the attackers' volume rather than their accuracy.
+            if refuted == 0 && confirmed >= 4 {
+                (self.report)(Event::Warning {
+                    message: format!(
+                        "the panel refuted none of {confirmed} findings in generation {}. \
+                         Either the change is genuinely this bad, or judging is not \
+                         discriminating -- check a refutation you disagree with in the \
+                         transcripts before trusting this generation's scores",
+                        generation + 1
+                    ),
+                });
             }
 
             (self.report)(Event::GenerationFinished {
@@ -279,6 +307,42 @@ impl Arena {
         }
 
         Ok(outcome)
+    }
+
+    /// Conditions that make the run's verdicts less trustworthy than they look.
+    ///
+    /// These are all knowable before any money is spent, and all of them are
+    /// easy to miss in a config that otherwise looks fine.
+    fn validity_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+
+        if self.providers.len() == 1 {
+            out.push(format!(
+                "every agent and every judge is `{}`. Findings are still defended and judged, \
+                 but a model grades its own output generously and corroboration across \
+                 providers cannot mean anything with one provider. Verdicts from this run are \
+                 weaker evidence than they appear",
+                self.providers[0].name()
+            ));
+        } else if let Some(pinned) = &self.cfg.arena.judge {
+            // Pinning the panel to one provider is legitimate, but it silently
+            // disables the author-exclusion that makes judging neutral.
+            out.push(format!(
+                "`[arena] judge` pins the whole panel to `{pinned}`, so judges will rule on \
+                 findings their own provider raised. Unset it to rotate judging across \
+                 providers that authored nothing in the batch"
+            ));
+        }
+
+        if self.panel.len() == 1 {
+            out.push(
+                "a single judge: its verdict is final and there is no disagreement to measure. \
+                 `consensus_weight` and the panel-split report do nothing"
+                    .to_string(),
+            );
+        }
+
+        out
     }
 
     async fn generation(

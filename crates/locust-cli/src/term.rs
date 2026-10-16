@@ -113,6 +113,9 @@ pub fn reporter(verbose: bool) -> Reporter {
             }
         }
         Event::Breeding { .. } => eprintln!("  {:<8} {}", cyan("breed"), dim("rewriting reviewers")),
+        Event::Warning { message } => {
+            eprintln!("\n{} {}\n", yellow("warn"), message);
+        }
         Event::Synthesizing => eprintln!("\n{} {}", cyan("synthesis"), dim("clustering survivors")),
         Event::BudgetReached { spent, budget } => {
             eprintln!(

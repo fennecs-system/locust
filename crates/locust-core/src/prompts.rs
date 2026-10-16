@@ -93,7 +93,9 @@ fn altitude_directive(generation: u32, total: u32, pressure: f64) -> String {
     }
 }
 
-pub struct AttackPrompt {
+/// A built system/user pair, ready to hand to a provider. Every phase returns
+/// one of these.
+pub struct Prompt {
     pub system: String,
     pub user: String,
 }
@@ -106,7 +108,7 @@ pub fn attack(
     total_generations: u32,
     pressure: f64,
     has_workspace: bool,
-) -> AttackPrompt {
+) -> Prompt {
     let system = format!(
         "{}{}\n\n---\n\n{ATTACK_RULES}\n\n---\n\n{FINDING_SCHEMA}",
         persona.prompt.trim(),
@@ -154,7 +156,7 @@ pub fn attack(
         "\nReview the change from your angle and return the JSON object. Nothing else."
     );
 
-    AttackPrompt { system, user }
+    Prompt { system, user }
 }
 
 /// Compact record of a finding earlier generations already argued out.
@@ -203,7 +205,7 @@ pub fn defend(
     pack: &ContextPack,
     findings: &[&Finding],
     has_workspace: bool,
-) -> AttackPrompt {
+) -> Prompt {
     let system = format!(
         "{}{}\n\n---\n\n{DEFEND_RULES}\n\n---\n\n{REBUTTAL_SCHEMA}",
         persona.prompt.trim(),
@@ -237,7 +239,7 @@ pub fn defend(
     }
 
     let _ = writeln!(user, "\n---\n\nAnswer every finding above. Return the JSON object only.");
-    AttackPrompt { system, user }
+    Prompt { system, user }
 }
 
 const JUDGE_RULES: &str = "\
@@ -303,7 +305,7 @@ pub fn judge(
     cases: &[(&Finding, Vec<&Rebuttal>)],
     settled: &[SettledFinding],
     judge: &Judge,
-) -> AttackPrompt {
+) -> Prompt {
     // The temperament goes *after* the shared rules: it is calibration applied
     // to a standard the whole panel works from, not a different job. A neutral
     // judge gets the rules verbatim and nothing else.
@@ -365,7 +367,7 @@ pub fn judge(
     }
 
     let _ = writeln!(user, "\n---\n\nRule on every case. Return the JSON object only.");
-    AttackPrompt { system, user }
+    Prompt { system, user }
 }
 
 const MUTATE_RULES: &str = "\
@@ -395,7 +397,7 @@ person, addressed to the reviewer. Do not include output-format instructions, \
 JSON schemas, or generic advice about being careful — those are supplied \
 separately. 120-250 words.";
 
-pub fn mutate(persona: &Persona, fitness: &Fitness, evidence: &str, pressure: f64) -> AttackPrompt {
+pub fn mutate(persona: &Persona, fitness: &Fitness, evidence: &str, pressure: f64) -> Prompt {
     let mut user = String::new();
     let _ = writeln!(user, "## Reviewer: {}\n", persona.name);
     let _ = writeln!(user, "Focus on record: {}\n", persona.focus);
@@ -435,7 +437,7 @@ pub fn mutate(persona: &Persona, fitness: &Fitness, evidence: &str, pressure: f6
         persona.name
     );
 
-    AttackPrompt { system: MUTATE_RULES.to_string(), user }
+    Prompt { system: MUTATE_RULES.to_string(), user }
 }
 
 const CROSSOVER_RULES: &str = "\
@@ -452,7 +454,7 @@ Write it in second person, addressed to the reviewer, with its own distinct \
 voice. No output-format instructions or JSON schemas — those are supplied \
 separately. 120-250 words.";
 
-pub fn crossover(a: &(Persona, Fitness), b: &(Persona, Fitness)) -> AttackPrompt {
+pub fn crossover(a: &(Persona, Fitness), b: &(Persona, Fitness)) -> Prompt {
     let mut user = String::new();
     for (p, f) in [a, b] {
         let _ = writeln!(
@@ -470,7 +472,7 @@ pub fn crossover(a: &(Persona, Fitness), b: &(Persona, Fitness)) -> AttackPrompt
         "Return JSON only:\n\n{{\n  \"name\": \"two or three words, lowercase\",\n  \
          \"focus\": \"one line\",\n  \"prompt\": \"the new system prompt\"\n}}"
     );
-    AttackPrompt { system: CROSSOVER_RULES.to_string(), user }
+    Prompt { system: CROSSOVER_RULES.to_string(), user }
 }
 
 const SYNTHESIS_RULES: &str = "\
@@ -497,7 +499,7 @@ pub fn synthesize(
     pack: &ContextPack,
     confirmed: &[(&Finding, &Ruling)],
     max_themes: usize,
-) -> AttackPrompt {
+) -> Prompt {
     let mut user = String::new();
     let _ = writeln!(user, "{}", pack.render(false));
     let _ = writeln!(user, "\n### Confirmed findings\n");
@@ -553,7 +555,7 @@ pub fn synthesize(
          \"recommendation\": \"one concrete sentence\",\n      \
          \"finding_ids\": [\"f-...\"]\n    }}\n  ]\n}}"
     );
-    AttackPrompt { system: SYNTHESIS_RULES.to_string(), user }
+    Prompt { system: SYNTHESIS_RULES.to_string(), user }
 }
 
 /// Wrap rendered trait text in a header, or produce nothing at all when the

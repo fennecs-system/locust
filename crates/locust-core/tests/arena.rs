@@ -612,6 +612,86 @@ async fn a_single_judge_panel_is_unanimous_by_definition() -> Result<()> {
     Ok(())
 }
 
+/// Both of these were observed in live runs and neither was surfaced by the
+/// tool: a run where every agent and judge is the same provider, and a
+/// generation where the panel refuted nothing. Each makes the verdicts weaker
+/// than they look, and each is silent unless the tool says so.
+#[tokio::test]
+async fn a_run_that_cannot_judge_itself_neutrally_says_so() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha"]);
+    cfg.arena.judge = None;
+
+    // Enough confirmed findings, none refuted: the rubber-stamp case.
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![
+            ("src/pool.rs", 2, "first distinct defect alpha", "local"),
+            ("src/pool.rs", 60, "second distinct defect beta", "local"),
+            ("src/pool.rs", 120, "third distinct defect gamma", "local"),
+            ("src/pool.rs", 180, "fourth distinct defect delta", "local"),
+        ],
+    ));
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], reporter)?;
+    arena.run().await?;
+
+    let warnings = warnings.lock().unwrap().clone();
+    assert!(
+        warnings.iter().any(|w| w.contains("every agent and every judge is `alpha`")),
+        "single-provider self-judging must be called out: {warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("refuted none of")),
+        "a panel that refutes nothing must be called out: {warnings:?}"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// The inverse: a healthy configuration must not nag.
+#[tokio::test]
+async fn a_well_formed_run_raises_no_validity_warnings() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha", "beta"]);
+    cfg.arena.judge = None;
+
+    let a: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect alpha", "local")]).refuting(),
+    );
+    let b: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("beta", vec![("src/pool.rs", 60, "a defect beta", "local")]).refuting(),
+    );
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg, vcs, vec![a, b], reporter)?;
+    arena.run().await?;
+
+    let warnings = warnings.lock().unwrap().clone();
+    assert!(warnings.is_empty(), "nothing to warn about here: {warnings:?}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_empty_diff_is_an_error_not_an_empty_review() -> Result<()> {
     let repo = fixture_repo()?;
