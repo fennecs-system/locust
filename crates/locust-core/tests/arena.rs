@@ -772,6 +772,89 @@ async fn partial_reviewer_failure_warns_about_the_smaller_population() -> Result
     Ok(())
 }
 
+/// Raised by the self-review: aborting on a totally-failed generation threw
+/// away every generation that had already completed. Earlier generations are
+/// finished work and cost real money; losing them to report a later failure is
+/// the wrong trade.
+#[tokio::test]
+async fn a_late_generation_failing_still_reports_the_earlier_ones() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(3, 2, &["alpha"]);
+
+    /// Healthy for generation 0, dead for every attack afterwards.
+    struct DiesAfterFirstGeneration(Scripted);
+
+    #[async_trait]
+    impl Provider for DiesAfterFirstGeneration {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn model(&self) -> &str {
+            "scripted"
+        }
+        async fn complete(&self, req: Request) -> Result<Response> {
+            if req.label.starts_with("gen1-atk") || req.label.starts_with("gen2-atk") {
+                bail!("provider died");
+            }
+            self.0.complete(req).await
+        }
+    }
+
+    let provider: locust_provider::SharedProvider =
+        Arc::new(DiesAfterFirstGeneration(Scripted::new(
+            "alpha",
+            vec![("src/pool.rs", 2, "compute result doubled without bounds", "local")],
+        )));
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], reporter)?;
+    let outcome = arena.run().await.expect("the completed generation is still a result");
+
+    assert_eq!(outcome.generations.len(), 1, "generation 0 survived the later failure");
+    assert!(!outcome.confirmed_findings().is_empty(), "and its findings are reported");
+
+    let warnings = warnings.lock().unwrap().clone();
+    assert!(
+        warnings.iter().any(|w| w.contains("generation(s) that completed")),
+        "the truncation must be stated: {warnings:?}"
+    );
+
+    // The report still renders, and says what it is.
+    let md = locust_core::report::markdown(&outcome, &cfg);
+    assert!(md.contains("Confirmed findings"));
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// But a run whose *first* generation fails entirely has nothing to report,
+/// and must stay an error rather than producing an empty clean bill.
+#[tokio::test]
+async fn a_first_generation_failing_entirely_is_still_fatal() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(3, 2, &["alpha"]);
+
+    let provider: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect", "local")]).failing_after(0),
+    );
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
+    let err = arena.run().await.unwrap_err().to_string();
+    assert!(err.contains("every reviewer failed"), "got: {err}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_empty_diff_is_an_error_not_an_empty_review() -> Result<()> {
     let repo = fixture_repo()?;

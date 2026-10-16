@@ -123,7 +123,10 @@ impl JudgeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct RunConfig {
     /// Revision the change is measured against.
     pub base: String,
@@ -185,7 +188,10 @@ pub enum WorkspacePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct ArenaConfig {
     /// Attackers per generation, spread across the enabled providers.
     pub attackers: usize,
@@ -214,7 +220,10 @@ impl Default for ArenaConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct ContextConfig {
     /// Include the post-change contents of each touched file, not just the
     /// hunks. API providers cannot open files, so without this they review a
@@ -256,7 +265,10 @@ impl Default for ContextConfig {
 /// The fitness function. A persona's score is the sum over the findings it
 /// raised, weighted by severity and by altitude-at-this-generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct ScoringConfig {
     pub confirmed: f64,
     /// Negative: raising noise has to cost something, or every persona
@@ -296,7 +308,10 @@ impl Default for ScoringConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct EvolutionConfig {
     pub enabled: bool,
     /// Top performers carried into the next generation verbatim.
@@ -328,7 +343,10 @@ impl Default for EvolutionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// `default` at the container level so a config written before a setting
+// existed still parses: every missing field falls back to this struct's
+// Default rather than being rejected.
+#[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     /// Cluster the surviving findings into root-cause themes at the end.
     pub enabled: bool,
@@ -640,8 +658,16 @@ impl Config {
                 bail!("judge `{}`: weight must not be negative", j.name);
             }
             if let Some(p) = &j.provider {
-                if !self.providers.iter().any(|c| &c.name == p) {
-                    bail!("judge `{}` names provider `{p}`, which is not configured", j.name);
+                // Checked against the *active* set, not everything configured:
+                // `[run] providers` or `enabled = false` can exclude a provider,
+                // and a judge pinned to one that is excluded would silently fall
+                // back to rotation rather than judging as configured.
+                if !self.active_providers().iter().any(|c| &c.name == p) {
+                    bail!(
+                        "judge `{}` is pinned to provider `{p}`, which is not active in this \
+                         run (check `enabled` and `[run] providers`)",
+                        j.name
+                    );
                 }
             }
             j.to_judge()?;
@@ -871,6 +897,78 @@ mod tests {
         });
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("at least one vote has to count"), "got: {err}");
+    }
+
+    /// Raised by locust reviewing its own diff, at `high`: adding
+    /// `consensus_weight` made every `locust.toml` with a `[scoring]` table
+    /// fail to parse, because the fields were individually required. The fix
+    /// has to generalise -- any setting added later would do the same thing.
+    #[test]
+    fn a_config_written_before_a_setting_existed_still_parses() {
+        let before = "\
+            [[provider]]\nname = \"anthropic\"\nkind = \"api\"\nwire = \"anthropic\"\n\n\
+            [scoring]\nconfirmed = 3.0\nrefuted = -1.5\nundecided = 0.25\n\
+            duplicate = 0.3\ncorroboration_bonus = 0.5\nstale_penalty = -1.0\n\
+            severity_weighted = true\n\n\
+            [arena]\nattackers = 6\ndefenders = 3\n\n\
+            [run]\nbase = \"main\"\ntarget = \"HEAD\"\ngenerations = 2\n\n\
+            [evolution]\nenabled = true\nelite = 2\n\n\
+            [synthesis]\nenabled = true\n";
+
+        let cfg: Config = toml::from_str(before).expect("a pre-existing config must still parse");
+        cfg.validate().unwrap();
+        // Settings the old file never mentioned fall back to their defaults.
+        assert_eq!(cfg.scoring.consensus_weight, ScoringConfig::default().consensus_weight);
+        assert_eq!(cfg.scoring.confirmed, 3.0, "and the ones it did set are honoured");
+        assert_eq!(cfg.arena.judge_batch, ArenaConfig::default().judge_batch);
+        assert_eq!(cfg.run.parallelism, RunConfig::default().parallelism);
+        assert_eq!(cfg.evolution.mutants, EvolutionConfig::default().mutants);
+    }
+
+    /// Forward compatibility must not come at the cost of catching typos: a
+    /// misspelled key has to stay an error rather than silently defaulting.
+    #[test]
+    fn forward_compatibility_does_not_swallow_misspelled_keys() {
+        for bad in [
+            "[scoring]\nseverty_weighted = true\n",
+            "[arena]\nattackrs = 4\n",
+            "[run]\ngenerationss = 2\n",
+            "[evolution]\nelites = 2\n",
+            "[synthesis]\nmax_theme = 4\n",
+            "[context]\nmax_file_byte = 10\n",
+        ] {
+            let text = format!(
+                "[[provider]]\nname = \"anthropic\"\nkind = \"api\"\nwire = \"anthropic\"\n\n{bad}"
+            );
+            assert!(toml::from_str::<Config>(&text).is_err(), "should reject: {bad}");
+        }
+    }
+
+    /// Raised by the self-review: a judge pinned to a provider that `[run]
+    /// providers` excludes used to pass validation and then silently fall back
+    /// to rotation, so the run judged differently than the config said.
+    #[test]
+    fn a_judge_pinned_to_an_excluded_provider_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers.push(sample_provider("openai", ProviderKind::Api));
+        cfg.judges.push(JudgeConfig {
+            name: "pinned".into(),
+            provider: Some("openai".into()),
+            weight: 1.0,
+            traits: TraitConfig::default(),
+        });
+        assert!(cfg.validate().is_ok(), "both providers active");
+
+        // Now exclude the pinned provider from the run.
+        cfg.run.providers = vec!["anthropic".into()];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("not active in this run"), "got: {err}");
+
+        // Same again via `enabled = false`.
+        cfg.run.providers.clear();
+        cfg.providers[1].enabled = false;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

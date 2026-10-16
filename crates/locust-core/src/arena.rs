@@ -41,6 +41,19 @@ pub enum Event {
 
 pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// A generation in which nothing could be reviewed at all. Carried as a typed
+/// error so the run can decide whether that is fatal (the first generation,
+/// with nothing to show) or simply the end of the run (a later one, with
+/// earlier generations worth reporting).
+#[derive(Debug, thiserror::Error)]
+#[error("every reviewer failed in generation {} ({launched}/{launched}); no review was performed. \
+         See .locust/runs/{run_id}/transcripts/ for the provider errors", generation + 1)]
+struct GenerationAborted {
+    generation: u32,
+    launched: usize,
+    run_id: String,
+}
+
 struct Attacked {
     findings: Vec<Finding>,
     failed: usize,
@@ -175,9 +188,24 @@ impl Arena {
                 personas: attackers.iter().map(|p| p.name.clone()).collect(),
             });
 
-            let outcome = self
+            let outcome = match self
                 .generation(generation, total, pressure, &pack, &population, &settled)
-                .await?;
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => match e.downcast::<GenerationAborted>() {
+                    // Nothing was ever reviewed: there is no report to make.
+                    Ok(aborted) if generations.is_empty() => return Err(aborted.into()),
+                    // Earlier generations stand; stop here and report them.
+                    Ok(aborted) => {
+                        (self.report)(Event::Warning {
+                            message: format!("{aborted}; reporting the {} generation(s) that completed", generations.len()),
+                        });
+                        break;
+                    }
+                    Err(other) => return Err(other),
+                },
+            };
 
             for ruling in &outcome.rulings {
                 if ruling.raw.verdict == Verdict::Undecided {
@@ -375,13 +403,15 @@ impl Arena {
         // no review at all. Returning "0 findings" and exiting 0 would let a CI
         // gate pass on a run that never happened.
         if launched > 0 && failed == launched {
-            bail!(
-                "every reviewer failed in generation {} ({launched}/{launched}); \
-                 no review was performed. See .locust/runs/{}/transcripts/ for the \
-                 provider errors",
-                generation + 1,
-                self.store.run_id
-            );
+            // Signalled rather than bailed: generations already completed are
+            // finished work, and throwing them away to report a later failure
+            // loses the whole run for the sake of its last step.
+            return Err(GenerationAborted {
+                generation,
+                launched,
+                run_id: self.store.run_id.clone(),
+            }
+            .into());
         }
         if failed * 2 >= launched && failed > 0 {
             (self.report)(Event::Warning {
@@ -726,9 +756,11 @@ impl Arena {
                         .call(&provider, &label, &prompt.system, &prompt.user, temperature, None)
                         .await;
 
+                    let mut ok = true;
                     let report: JudgeReport = match out.and_then(|t| extract_json(&t)) {
                         Ok(r) => r,
                         Err(e) => {
+                            ok = false;
                             (self.report)(Event::AgentFailed {
                                 label: label.clone(),
                                 error: e.to_string(),
@@ -756,14 +788,34 @@ impl Arena {
                         })
                         .collect();
 
-                    (self.report)(Event::AgentFinished { label, produced: votes.len() });
-                    votes
+                    if ok {
+                        (self.report)(Event::AgentFinished { label, produced: votes.len() });
+                    }
+                    (votes, ok)
                 });
             }
         }
 
+        let results = futures::future::join_all(tasks).await;
+        let calls = results.len();
+        let failed = results.iter().filter(|(_, ok)| !ok).count();
         let votes: Vec<JudgeVote> =
-            futures::future::join_all(tasks).await.into_iter().flatten().collect();
+            results.into_iter().flat_map(|(v, _)| v).collect();
+
+        // A judge that errored is absent, not agreeing. Left unsaid, a panel of
+        // three that lost one reports its verdict as unanimous 2/2 and the
+        // dissent figure -- the whole reason to run a panel -- quietly becomes
+        // a measurement of a smaller panel than was configured.
+        if failed > 0 {
+            (self.report)(Event::Warning {
+                message: format!(
+                    "{failed} of {calls} judge calls failed in generation {}; affected findings \
+                     were ruled by a smaller panel than configured, so their agreement figures \
+                     are over the judges that answered",
+                    generation + 1
+                ),
+            });
+        }
 
         // Group by finding, preserving the order the findings came in so the
         // report is stable across runs.
