@@ -11,13 +11,13 @@
 #   locust personas --full      read the reviewer prompts
 
 [run]
-base = "b7685ed"
+base = "main"
 target = "HEAD"
 
 # Each generation raises the weight on structural findings and bans everything
 # already settled, so later rounds are forced to look higher. Two is the minimum
 # for that to mean anything; three is the useful default.
-generations = 1
+generations = 3
 
 # Agents in flight at once. Raise it if your rate limits allow.
 parallelism = 6
@@ -38,11 +38,11 @@ budget_usd = 0.0
 
 [arena]
 # Reviewers per generation, spread across the providers below.
-attackers = 4
+attackers = 6
 
 # Defenders answering them. More defenders means findings must survive more
 # angles of attack before they reach you.
-defenders = 1
+defenders = 3
 
 # Findings per defender and judge call. Smaller batches reason better and cost more.
 judge_batch = 8
@@ -236,7 +236,16 @@ kind = "cli"
 preset = "claude"
 timeout_secs = 900
 
-# `codex` is not on PATH:
+# A second provider is the highest-value change you can make to this config:
+# it gives the panel a vendor that authored none of the findings it judges,
+# and makes cross-provider corroboration mean something. Uncomment once
+# `codex` is on PATH, then check `locust providers`.
+#
+# The codex preset's argv and `extract` path have not been validated against a
+# real codex CLI. If it fails, the error now reports what codex printed, and
+# you can override any of these per provider:
+#   command = ["codex", "exec", "--json", "--skip-git-repo-check", "-"]
+#   extract = { json_lines = "msg/message" }
 # [[provider]]
 # name = "codex-cli"
 # kind = "cli"
