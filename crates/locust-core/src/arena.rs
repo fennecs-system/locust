@@ -41,6 +41,12 @@ pub enum Event {
 
 pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
 
+struct Attacked {
+    findings: Vec<Finding>,
+    failed: usize,
+    launched: usize,
+}
+
 pub struct Arena {
     cfg: Config,
     vcs: Arc<dyn Vcs>,
@@ -362,8 +368,30 @@ impl Arena {
         let defenders: Vec<&Persona> =
             population.iter().filter(|p| p.role == Role::Defender).collect();
 
-        let mut findings =
+        let Attacked { mut findings, failed, launched } =
             self.attack(generation, total, pressure, pack, &attackers, settled).await;
+
+        // A generation where every reviewer failed is not a clean review, it is
+        // no review at all. Returning "0 findings" and exiting 0 would let a CI
+        // gate pass on a run that never happened.
+        if launched > 0 && failed == launched {
+            bail!(
+                "every reviewer failed in generation {} ({launched}/{launched}); \
+                 no review was performed. See .locust/runs/{}/transcripts/ for the \
+                 provider errors",
+                generation + 1,
+                self.store.run_id
+            );
+        }
+        if failed * 2 >= launched && failed > 0 {
+            (self.report)(Event::Warning {
+                message: format!(
+                    "{failed} of {launched} reviewers failed in generation {}; the population \
+                     was smaller than configured and the fitness scores reflect that",
+                    generation + 1
+                ),
+            });
+        }
         crate::dedup::cluster(&mut findings);
         (self.report)(Event::PhaseFinished { generation, phase: "attack", count: findings.len() });
 
@@ -423,6 +451,9 @@ impl Arena {
 
     // ---- phases -----------------------------------------------------------
 
+    /// Outcome of one attack phase. The counts matter as much as the findings:
+    /// an empty result from four healthy reviewers means the change is clean,
+    /// while an empty result from four failures means nothing was reviewed.
     async fn attack(
         &self,
         generation: u32,
@@ -431,7 +462,7 @@ impl Arena {
         pack: &Arc<ContextPack>,
         attackers: &[&Persona],
         settled: &[SettledFinding],
-    ) -> Vec<Finding> {
+    ) -> Attacked {
         let slots = self.cfg.arena.attackers.max(1);
         let mut tasks = Vec::new();
 
@@ -483,10 +514,12 @@ impl Arena {
                     .await;
                 self.release(ws).await;
 
+                let mut ok = true;
                 let report: AttackReport = match out {
                     Ok(text) => match extract_json(&text) {
                         Ok(r) => r,
                         Err(e) => {
+                            ok = false;
                             (self.report)(Event::AgentFailed {
                                 label: label.clone(),
                                 error: format!("unparseable output: {e}"),
@@ -495,6 +528,7 @@ impl Arena {
                         }
                     },
                     Err(e) => {
+                        ok = false;
                         (self.report)(Event::AgentFailed {
                             label: label.clone(),
                             error: e.to_string(),
@@ -520,15 +554,21 @@ impl Arena {
                     })
                     .collect();
 
-                (self.report)(Event::AgentFinished {
-                    label,
-                    produced: findings.len(),
-                });
-                findings
+                if ok {
+                    (self.report)(Event::AgentFinished {
+                        label,
+                        produced: findings.len(),
+                    });
+                }
+                (findings, ok)
             });
         }
 
-        futures::future::join_all(tasks).await.into_iter().flatten().collect()
+        let results = futures::future::join_all(tasks).await;
+        let launched = results.len();
+        let failed = results.iter().filter(|(_, ok)| !ok).count();
+        let findings = results.into_iter().flat_map(|(f, _)| f).collect();
+        Attacked { findings, failed, launched }
     }
 
     async fn defend(

@@ -692,6 +692,86 @@ async fn a_well_formed_run_raises_no_validity_warnings() -> Result<()> {
     Ok(())
 }
 
+/// Found by running locust on itself: the provider hit its usage limit, all
+/// four reviewers failed, and the run printed "0 findings raised" and exited
+/// **0**. A CI gate would have passed a review that never happened.
+#[tokio::test]
+async fn a_review_where_every_reviewer_failed_is_an_error_not_a_clean_bill() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 2, &["alpha"]);
+
+    let provider: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect", "local")]).failing_after(0),
+    );
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
+    let err = arena.run().await.unwrap_err().to_string();
+    assert!(err.contains("every reviewer failed"), "got: {err}");
+    assert!(err.contains("no review was performed"), "got: {err}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// The inverse must stay true: healthy reviewers that genuinely find nothing
+/// are a clean review, not an error.
+#[tokio::test]
+async fn healthy_reviewers_finding_nothing_is_a_clean_review() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 2, &["alpha"]);
+
+    // Succeeds, reports an empty findings list.
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new("alpha", vec![]));
+
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
+    let outcome = arena.run().await?;
+    assert!(outcome.generations[0].findings.is_empty());
+    assert!(outcome.confirmed_findings().is_empty());
+    assert!(locust_core::report::markdown(&outcome, &cfg).contains("No confirmed findings"));
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// Partial failure degrades rather than aborting, but must not do so silently.
+#[tokio::test]
+async fn partial_reviewer_failure_warns_about_the_smaller_population() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha", "beta"]);
+    cfg.arena.judge = Some("alpha".into());
+
+    let a: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![("src/pool.rs", 2, "a real defect alpha", "local")],
+    ));
+    let b: locust_provider::SharedProvider =
+        Arc::new(Scripted::new("beta", vec![]).failing_after(0));
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg, vcs, vec![a, b], reporter)?;
+    let outcome = arena.run().await?;
+    assert!(!outcome.generations[0].findings.is_empty(), "the healthy half still reviewed");
+
+    let warnings = warnings.lock().unwrap().clone();
+    assert!(
+        warnings.iter().any(|w| w.contains("reviewers failed")),
+        "a halved population must be stated: {warnings:?}"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_empty_diff_is_an_error_not_an_empty_review() -> Result<()> {
     let repo = fixture_repo()?;

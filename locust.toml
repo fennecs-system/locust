@@ -1,0 +1,302 @@
+# locust — adversarial, evolutionary code review.
+#
+# Reviewers compete to find real defects in a change. A defender tries to destroy
+# everything they raise; an impartial judge rules on what survives. Reviewers are
+# scored on findings that live through that, so noise costs them. Between
+# generations the winning prompts breed and the rest are culled.
+#
+#   locust review --dry-run     what it will do, and what it will cost
+#   locust review               run it
+#   locust providers            check credentials and CLIs
+#   locust personas --full      read the reviewer prompts
+
+[run]
+base = "b7685ed"
+target = "HEAD"
+
+# Each generation raises the weight on structural findings and bans everything
+# already settled, so later rounds are forced to look higher. Two is the minimum
+# for that to mean anything; three is the useful default.
+generations = 1
+
+# Agents in flight at once. Raise it if your rate limits allow.
+parallelism = 6
+
+# auto | git | jj — auto prefers jj when the repo is a jj workspace.
+vcs = "auto"
+
+# auto gives a private checkout to any provider that can use one (the CLI
+# providers below), so those agents can grep for call sites and run tests to prove
+# a finding rather than asserting it. always | never also available.
+workspaces = "auto"
+
+# Stop after the current generation once spend passes this, and report what the
+         # arena settled so far. Needs per-token costs set on the providers below.
+         # 0 disables the check.
+budget_usd = 0.0
+
+
+[arena]
+# Reviewers per generation, spread across the providers below.
+attackers = 4
+
+# Defenders answering them. More defenders means findings must survive more
+# angles of attack before they reach you.
+defenders = 1
+
+# Findings per defender and judge call. Smaller batches reason better and cost more.
+judge_batch = 8
+
+# Who the judges *are* is the [[judge]] panel further down; this setting is only
+# about which provider carries their votes. Left unset, each judge rotates across
+# providers that authored none of the findings in front of it -- models prefer
+# their own output, and a judge ruling on its own agents' findings turns the
+# tournament into a popularity contest between vendors. Setting it pins the whole
+# panel to one provider, which keeps temperament diversity but loses vendor
+# diversity.
+judge_excludes_author = true
+judge = "claude-cli"
+
+
+[context]
+# Hand reviewers the whole post-change file, not just the hunks. Reviewing a
+# unified diff alone is the main cause of confident, wrong findings: the reviewer
+# cannot see the guard twelve lines above the hunk.
+include_full_files = true
+max_file_bytes = 60000
+max_total_bytes = 400000
+exclude = ["Cargo.lock", "package-lock.json", "/node_modules/", "/vendor/", "/target/", "*.min.js"]
+
+# Pasted into every agent's prompt. House conventions, patterns that are
+# deliberate here, your actual threat model — this is the cheapest way to stop
+# the arena relitigating decisions your team already made.
+notes = """
+This is `locust` itself: a CLI that reviews code by running competing LLM agents
+in an arena. Attackers raise findings, defenders try to refute them, a panel of
+judges with different temperaments rules on what survives, and winning reviewer
+prompts breed into the next generation.
+
+Deliberate choices, so you do not relitigate them:
+- Agent failures degrade the run rather than aborting it. A provider that errors
+  shrinks that phase's population; this is intended, and is reported.
+- Prompt text in `prompts.rs` and `seeds.rs` is the product, not scaffolding.
+- Scoring constants are configurable defaults, not magic numbers.
+"""
+
+[scoring]
+# A reviewer's fitness. Points are multiplied by the judge's severity rating and
+# by an altitude weight that ramps each generation, so a line-level finding worth
+# 1.0x in the first round is worth 0.15x in the last.
+confirmed = 3.0
+
+# Negative on purpose. Without a cost for noise the best strategy is to spray
+# low-confidence guesses, which is the behaviour this tool exists to remove.
+refuted = -1.5
+undecided = 0.25
+
+# Credit for independently rediscovering something already confirmed. A duplicate
+         # inherits its cluster's verdict, so echoing a *refuted* claim costs the full
+         # `refuted` penalty — otherwise agreeing with noise is free.
+duplicate = 0.3
+
+# Per extra provider that raised the same finding independently.
+corroboration_bonus = 0.5
+
+# Applied when the judge rules a finding a restatement of a settled one.
+stale_penalty = -1.0
+severity_weighted = true
+
+# How much a split panel discounts a finding. 0.0 ignores dissent; 1.0 scores a
+# finding purely by the share of panel weight behind it. Does nothing with one judge.
+consensus_weight = 0.5
+
+[evolution]
+# Selection acts on prompts. Each generation the population is rebuilt from
+# elites carried over unchanged, mutants rewritten against their own scorecard,
+# crossovers blending two winners, and immigrants from the built-in library so
+# the population does not collapse onto one point of view.
+enabled = true
+elite = 2
+mutants = 2
+crossovers = 1
+immigrants = 1
+
+# Personas scoring at or below this are culled regardless of rank.
+cull_below = 0.0
+
+[synthesis]
+# The last step, and the one that produces the output you actually read: cluster
+# the surviving findings by root cause so three confirmed findings about forgotten
+# cleanup are reported as one issue about where this code puts its cleanup.
+enabled = true
+max_themes = 8
+
+# --- judges ------------------------------------------------------------
+#
+# Judges have temperament, expressed as Big Five (OCEAN) traits in 0.0-1.0.
+# `locust judges` prints the panel; `locust judges --full` prints the prompt text
+# each temperament produces.
+#
+#   openness           structural argument vs. demand a reproduction
+#   conscientiousness  audit every claim vs. judge on overall plausibility
+#   extraversion       weigh the debate vs. ignore it and re-read the code
+#   agreeableness      benefit of the doubt vs. guilty until proven
+#   neuroticism        a possible failure is inevitable vs. dismiss hypotheticals
+#
+# 0.5 is neutral and adds no prompt text at all, so a trait you do not set costs
+# you nothing. The band around 0.5 is deliberately wide: 0.6 still reads as
+# neutral, so you have to mean it before a judge changes behaviour.
+#
+# The default panel is three contrasting temperaments, below. A finding all three
+# confirm cleared three different bars; one only `stickler` confirms is a nitpick;
+# one only `pragmatist` refuted may be worth a second look. That spread is the
+# whole reason to run more than one judge, and it is reported under 'Where the
+# panel split'. Delete two of these to go back to a single judge and a third of
+# the judging cost.
+#
+# Presets: neutral, stickler, pragmatist, architect, paranoid, skeptic, advocate.
+
+# audits every claim, wants the evidence quoted, assumes the reviewer is wrong
+[[judge]]
+name = "stickler"
+preset = "stickler"
+
+# asks whether anyone will actually be hurt; deflates hypotheticals
+[[judge]]
+name = "pragmatist"
+preset = "pragmatist"
+
+# will confirm a structural claim on the strength of the argument alone
+[[judge]]
+name = "architect"
+preset = "architect"
+
+# Override individual axes on top of a preset, or skip the preset entirely.
+# `provider` pins a judge to one model; left unset, judges rotate across providers
+# that authored none of the findings they are ruling on -- so a three-judge panel
+# over three providers gets temperament diversity and vendor diversity at once.
+#
+# [[judge]]
+# name = "release gate"
+# provider = "anthropic"
+# weight = 2.0            # counts double in the vote
+# preset = "skeptic"
+# neuroticism = 0.9       # ... but anxious about what it does confirm
+
+
+# --- providers ---------------------------------------------------------
+
+# ANTHROPIC_API_KEY is not set:
+# [[provider]]
+# name = "anthropic"
+# kind = "api"
+# wire = "anthropic"
+# model = "claude-opus-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+# input_cost_per_mtok = 5
+# output_cost_per_mtok = 25
+
+# OPENAI_API_KEY is not set:
+# [[provider]]
+# name = "openai"
+# kind = "api"
+# wire = "open_ai"
+# model = "gpt-5"
+# api_key_env = "OPENAI_API_KEY"
+# input_cost_per_mtok = 1.25
+# output_cost_per_mtok = 10
+
+# GEMINI_API_KEY is not set:
+# [[provider]]
+# name = "gemini"
+# kind = "api"
+# wire = "gemini"
+# model = "gemini-2.5-pro"
+# api_key_env = "GEMINI_API_KEY"
+# input_cost_per_mtok = 1.25
+# output_cost_per_mtok = 10
+
+# Agentic CLIs run inside the agent's own private worktree, so they can open files
+# the context pack omitted and grep for every call site.
+#
+# They are given read-only tools by default. To let them run the test suite — which
+# makes a finding much harder to refute, because it was demonstrated rather than
+# argued — grant execution explicitly by spelling out the command:
+#
+#   command = ["claude", "-p", "--output-format", "json",
+#              "--allowed-tools", "Read,Grep,Glob,Bash",
+#              "--append-system-prompt", "{system}"]
+#
+# The worktree is disposable and discarded after the agent finishes, but the agent
+# runs with your credentials and network access. Grant it deliberately.
+
+[[provider]]
+name = "claude-cli"
+kind = "cli"
+preset = "claude"
+timeout_secs = 900
+
+# `codex` is not on PATH:
+# [[provider]]
+# name = "codex-cli"
+# kind = "cli"
+# preset = "codex"
+# timeout_secs = 900
+
+# `gemini` is not on PATH:
+# [[provider]]
+# name = "gemini-cli"
+# kind = "cli"
+# preset = "gemini"
+# timeout_secs = 900
+
+# A provider the presets do not cover — any OpenAI-compatible endpoint, or a
+# CLI with its own argv. {system}, {prompt} and {model} are substituted.
+#
+# [[provider]]
+# name = "openrouter"
+# kind = "api"
+# wire = "open_ai"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "deepseek/deepseek-r1"
+# api_key_env = "OPENROUTER_API_KEY"
+#
+# [[provider]]
+# name = "custom-cli"
+# kind = "cli"
+# command = ["my-agent", "--system", "{system}"]
+# stdin = "{prompt}"
+# extract = { json_path = "result" }   # or "raw", or { json_lines = "msg/text" }
+
+# --- personas ----------------------------------------------------------
+#
+# Omit these entirely and locust uses its built-in library (see `locust personas`).
+# Declaring even one of a role replaces the library for that role, so these are
+# where your team's review standards live, in version control next to the code
+# they apply to. A persona is a point of view, not a checklist.
+#
+# Reviewers take the same OCEAN traits as judges, read in a reviewer's voice:
+# agreeableness is how readily it gives the author the benefit of the doubt,
+# neuroticism is how much a rare failure path worries it. The built-in library is
+# neutral on purpose -- those prompts were written to stand alone, and a trait
+# paragraph bolted on would compete with them rather than sharpen them.
+#
+# [[persona]]
+# role = "attacker"
+# name = "migration safety"
+# focus = "changes that are unsafe while both versions are deployed"
+# neuroticism = 0.85        # a possible window is an inevitable one
+# agreeableness = 0.2       # assumes nothing was thought through
+# prompt = """
+# You review every change as though it will be half-deployed for twenty minutes.
+# Old and new code run at once against one database.
+#
+# Can a writer on the new code produce a row the old code misreads? Does a column
+# get read before the backfill finishes? Is a queue message written in a shape the
+# currently-running consumers cannot parse? Does a feature flag default leave the
+# system in a state neither version expects?
+#
+# Name the window and the interleaving. 'Could break during deploy' is not a
+# finding; 'between the migration and the backfill, a read of X returns NULL and
+# the old decoder panics' is.
+# """

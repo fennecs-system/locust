@@ -124,7 +124,7 @@ impl Provider for CliProvider {
                 "provider `{}` exited {}: {}",
                 self.settings.name,
                 out.status,
-                String::from_utf8_lossy(&out.stderr).trim().chars().take(600).collect::<String>()
+                failure_detail(&stdout, &String::from_utf8_lossy(&out.stderr))
             );
         }
 
@@ -174,6 +174,33 @@ impl Provider for CliProvider {
             provider: self.settings.name.clone(),
             model: self.settings.model.clone(),
         })
+    }
+}
+
+/// Best available explanation for a non-zero exit.
+///
+/// Agentic CLIs routinely report their own failures on **stdout** — often as
+/// the same JSON envelope they use for success, with an error flag — and leave
+/// stderr empty. Reading only stderr yields `exited exit status: 1: ` with
+/// nothing after the colon, which is how a whole run can fail with no way to
+/// tell why.
+fn failure_detail(stdout: &str, stderr: &str) -> String {
+    let clip = |s: &str| s.trim().chars().take(600).collect::<String>();
+
+    if let Ok(v) = extract_json::<serde_json::Value>(stdout) {
+        for key in ["error", "message", "result"] {
+            if let Some(text) = v.get(key).and_then(|x| x.as_str()) {
+                if !text.trim().is_empty() {
+                    return clip(text);
+                }
+            }
+        }
+    }
+    // Prefer stderr when it says anything, then fall back to raw stdout.
+    match (clip(stderr), clip(stdout)) {
+        (e, _) if !e.is_empty() => e,
+        (_, o) if !o.is_empty() => o,
+        _ => "no output on stdout or stderr".into(),
     }
 }
 
@@ -256,6 +283,27 @@ pub fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_reported_only_on_stdout_is_still_explained() {
+        // Observed live: four agents failed and locust printed
+        // "exited exit status: 1: " with nothing after the colon, because the
+        // CLI wrote its reason to stdout.
+        let stdout = r#"{"is_error":true,"result":"Usage limit reached","type":"result"}"#;
+        assert_eq!(failure_detail(stdout, ""), "Usage limit reached");
+    }
+
+    #[test]
+    fn stderr_wins_when_it_has_something_to_say() {
+        assert_eq!(failure_detail("", "command not found"), "command not found");
+        assert_eq!(failure_detail("raw text", ""), "raw text");
+    }
+
+    #[test]
+    fn total_silence_is_said_out_loud_rather_than_left_blank() {
+        assert_eq!(failure_detail("", ""), "no output on stdout or stderr");
+        assert!(!failure_detail("  \n ", " ").is_empty());
+    }
 
     #[test]
     fn dig_walks_objects_and_arrays() {
