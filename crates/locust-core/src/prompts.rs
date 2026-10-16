@@ -7,7 +7,8 @@
 
 use crate::config::Config;
 use crate::context::ContextPack;
-use crate::model::{Altitude, Finding, Fitness, Persona, Rebuttal, Role, Ruling, Verdict};
+use crate::model::{Altitude, Finding, Fitness, Judge, Persona, Rebuttal, Role, Ruling, Verdict};
+use crate::traits::Voice;
 use std::fmt::Write as _;
 
 /// Rules every attacker obeys regardless of persona.
@@ -107,8 +108,9 @@ pub fn attack(
     has_workspace: bool,
 ) -> AttackPrompt {
     let system = format!(
-        "{}\n\n---\n\n{ATTACK_RULES}\n\n---\n\n{FINDING_SCHEMA}",
-        persona.prompt.trim()
+        "{}{}\n\n---\n\n{ATTACK_RULES}\n\n---\n\n{FINDING_SCHEMA}",
+        persona.prompt.trim(),
+        temperament(&persona.traits.render(Voice::Reviewer))
     );
 
     let mut user = String::new();
@@ -203,8 +205,9 @@ pub fn defend(
     has_workspace: bool,
 ) -> AttackPrompt {
     let system = format!(
-        "{}\n\n---\n\n{DEFEND_RULES}\n\n---\n\n{REBUTTAL_SCHEMA}",
-        persona.prompt.trim()
+        "{}{}\n\n---\n\n{DEFEND_RULES}\n\n---\n\n{REBUTTAL_SCHEMA}",
+        persona.prompt.trim(),
+        temperament(&persona.traits.render(Voice::Reviewer))
     );
 
     let mut user = String::new();
@@ -299,8 +302,15 @@ pub fn judge(
     pack: &ContextPack,
     cases: &[(&Finding, Vec<&Rebuttal>)],
     settled: &[SettledFinding],
+    judge: &Judge,
 ) -> AttackPrompt {
-    let system = format!("{JUDGE_RULES}\n\n---\n\n{RULING_SCHEMA}");
+    // The temperament goes *after* the shared rules: it is calibration applied
+    // to a standard the whole panel works from, not a different job. A neutral
+    // judge gets the rules verbatim and nothing else.
+    let system = format!(
+        "{JUDGE_RULES}{}\n\n---\n\n{RULING_SCHEMA}",
+        temperament(&judge.traits.render(Voice::Judge))
+    );
 
     let mut user = String::new();
     // The judge always gets sources: it has no workspace and must be able to
@@ -491,17 +501,45 @@ pub fn synthesize(
     let mut user = String::new();
     let _ = writeln!(user, "{}", pack.render(false));
     let _ = writeln!(user, "\n### Confirmed findings\n");
+    let mut any_panel = false;
     for (f, r) in confirmed {
+        let panel = if r.panel.len() > 1 {
+            any_panel = true;
+            let (backing, total) = r.tally();
+            let dissenters: Vec<&str> = r
+                .panel
+                .iter()
+                .filter(|v| v.raw.verdict != r.raw.verdict)
+                .map(|v| v.judge.as_str())
+                .collect();
+            if dissenters.is_empty() {
+                format!(" _(panel {backing}/{total}, unanimous)_")
+            } else {
+                format!(" _(panel {backing}/{total}; {} disagreed)_", dissenters.join(", "))
+            }
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             user,
-            "- **{}** `{}` [{} / {}] — {}\n  {}\n  _judge:_ {}",
+            "- **{}** `{}` [{} / {}]{panel} — {}\n  {}\n  _judges:_ {}",
             f.id,
             f.location(),
             r.raw.severity,
             r.raw.altitude,
             f.raw.title,
             f.raw.claim,
-            r.raw.reasoning
+            r.raw.reasoning.replace('\n', " / ")
+        );
+    }
+
+    if any_panel {
+        let _ = writeln!(
+            user,
+            "\nEach finding was ruled by a panel of judges with different standards of proof. \
+             A unanimous finding cleared all of them; one a judge disagreed about cleared some \
+             and not others. Lead with what the panel agreed on, and where a theme rests mostly \
+             on contested findings, say so in its summary rather than presenting it as settled."
         );
     }
     let _ = writeln!(
@@ -516,6 +554,17 @@ pub fn synthesize(
          \"finding_ids\": [\"f-...\"]\n    }}\n  ]\n}}"
     );
     AttackPrompt { system: SYNTHESIS_RULES.to_string(), user }
+}
+
+/// Wrap rendered trait text in a header, or produce nothing at all when the
+/// temperament is neutral. A persona that sets no traits must read exactly as
+/// it did before traits existed.
+fn temperament(rendered: &str) -> String {
+    if rendered.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n---\n\n### Your temperament\n\n{rendered}")
+    }
 }
 
 /// Whether this agent should be given a worktree.

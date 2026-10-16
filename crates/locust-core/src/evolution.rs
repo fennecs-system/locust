@@ -128,6 +128,9 @@ pub async fn breed(
         match call_meta(meta, &prompt, &format!("gen{next_generation}/mutate/{}", p.id)).await {
             Ok((spec, u)) => {
                 usage.merge(&u);
+                // Temperament is inherited: the meta-prompt rewrites prose,
+                // not traits, so a persona tuned by hand keeps its calibration
+                // across generations.
                 let child = from_spec(
                     spec,
                     Role::Attacker,
@@ -135,6 +138,7 @@ pub async fn breed(
                     Origin::Mutant,
                     Some(p.id.clone()),
                     p.temperature,
+                    p.traits,
                 );
                 admit(&mut next, &mut names, child);
             }
@@ -166,6 +170,7 @@ pub async fn breed(
                         Origin::Crossover,
                         Some(a.0.id.clone()),
                         (a.0.temperature + b.0.temperature) / 2.0,
+                        blend(a.0.traits, b.0.traits),
                     );
                     admit(&mut next, &mut names, child);
                 }
@@ -238,7 +243,8 @@ fn carry_defenders(cfg: &Config, current: &[Persona], generation: u32) -> Vec<Pe
         })
         .collect();
     if defenders.is_empty() {
-        defenders = cfg.seed_personas(Role::Defender);
+        // A config error here would already have failed validation at startup.
+        defenders = cfg.seed_personas(Role::Defender).unwrap_or_default();
         for d in &mut defenders {
             d.generation = generation;
         }
@@ -247,6 +253,7 @@ fn carry_defenders(cfg: &Config, current: &[Persona], generation: u32) -> Vec<Pe
     defenders
 }
 
+#[allow(clippy::too_many_arguments)]
 fn from_spec(
     spec: PersonaSpec,
     role: Role,
@@ -254,8 +261,10 @@ fn from_spec(
     origin: Origin,
     parent: Option<String>,
     temperature: f32,
+    traits: crate::traits::Traits,
 ) -> Persona {
     Persona {
+        traits,
         id: format!("{}-{}-g{generation}", role.short(), crate::config::slug(&spec.name)),
         name: spec.name,
         role,
@@ -266,6 +275,16 @@ fn from_spec(
         parent,
         origin,
     }
+}
+
+/// Midpoint of two temperaments, for a crossover that inherits from both.
+fn blend(a: crate::traits::Traits, b: crate::traits::Traits) -> crate::traits::Traits {
+    use crate::traits::Axis;
+    let mut out = a;
+    for axis in Axis::ALL {
+        out.set(axis, (a.get(axis) + b.get(axis)) / 2.0);
+    }
+    out
 }
 
 fn dedupe_ids(personas: &mut [Persona]) {
@@ -358,6 +377,7 @@ mod tests {
             prompt: String::new(),
             focus: String::new(),
             temperature: 0.8,
+            traits: Default::default(),
             generation: 1,
             parent: None,
             origin: Origin::Elite,
@@ -377,6 +397,7 @@ mod tests {
             prompt: String::new(),
             focus: String::new(),
             temperature: 0.8,
+            traits: Default::default(),
             generation: 0,
             parent: None,
             origin: Origin::Seed,

@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::model::{Origin, Persona, Role};
+use crate::model::{Judge, Origin, Persona, Role};
+use crate::traits::Traits;
 
 pub const CONFIG_FILENAME: &str = "locust.toml";
 
@@ -37,6 +38,88 @@ pub struct Config {
     pub providers: Vec<ProviderConfig>,
     #[serde(default, rename = "persona")]
     pub personas: Vec<PersonaConfig>,
+    #[serde(default, rename = "judge")]
+    pub judges: Vec<JudgeConfig>,
+}
+
+/// Five optional floats in `0.0..=1.0`, flattened into whatever declares them.
+/// Anything left unset stays neutral and contributes no prompt text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraitConfig {
+    /// Named archetype to start from; individual axes below override it.
+    #[serde(default)]
+    pub preset: Option<String>,
+    #[serde(default)]
+    pub openness: Option<f64>,
+    #[serde(default)]
+    pub conscientiousness: Option<f64>,
+    #[serde(default)]
+    pub extraversion: Option<f64>,
+    #[serde(default)]
+    pub agreeableness: Option<f64>,
+    #[serde(default)]
+    pub neuroticism: Option<f64>,
+}
+
+impl TraitConfig {
+    pub fn resolve(&self, what: &str) -> Result<Traits> {
+        let mut t = match &self.preset {
+            Some(name) => Traits::preset(name).with_context(|| {
+                format!(
+                    "{what}: unknown trait preset `{name}` (try {})",
+                    Traits::PRESETS.join(", ")
+                )
+            })?,
+            None => Traits::NEUTRAL,
+        };
+        for (value, axis) in [
+            (self.openness, crate::traits::Axis::Openness),
+            (self.conscientiousness, crate::traits::Axis::Conscientiousness),
+            (self.extraversion, crate::traits::Axis::Extraversion),
+            (self.agreeableness, crate::traits::Axis::Agreeableness),
+            (self.neuroticism, crate::traits::Axis::Neuroticism),
+        ] {
+            if let Some(v) = value {
+                if !(0.0..=1.0).contains(&v) {
+                    bail!("{what}: `{}` must be between 0.0 and 1.0, got {v}", axis.name());
+                }
+                t.set(axis, v);
+            }
+        }
+        Ok(t.clamped())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeConfig {
+    pub name: String,
+    /// Pin this judge to one provider. Left unset, judges rotate across the
+    /// providers that did not author the findings in front of them — which
+    /// also spreads a panel across vendors, so you get temperament diversity
+    /// and model diversity from the same configuration.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Relative weight of this judge's vote.
+    #[serde(default = "one")]
+    pub weight: f64,
+    #[serde(default, flatten)]
+    pub traits: TraitConfig,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+impl JudgeConfig {
+    pub fn to_judge(&self) -> Result<Judge> {
+        Ok(Judge {
+            name: self.name.clone(),
+            traits: self.traits.resolve(&format!("judge `{}`", self.name))?,
+            provider: self.provider.clone(),
+            weight: self.weight,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +273,11 @@ pub struct ScoringConfig {
     pub stale_penalty: f64,
     /// Scale confirmed findings by the judge's severity rating.
     pub severity_weighted: bool,
+    /// How much a split panel discounts a finding. `0.0` ignores dissent
+    /// entirely; `1.0` scores a finding purely by the share of panel weight
+    /// that backed it. With a single judge there is never any dissent, so this
+    /// does nothing until you run a panel.
+    pub consensus_weight: f64,
 }
 
 impl Default for ScoringConfig {
@@ -202,6 +290,7 @@ impl Default for ScoringConfig {
             corroboration_bonus: 0.5,
             stale_penalty: -1.0,
             severity_weighted: true,
+            consensus_weight: 0.5,
         }
     }
 }
@@ -453,21 +542,31 @@ pub struct PersonaConfig {
     pub focus: String,
     #[serde(default)]
     pub temperature: Option<f32>,
+    #[serde(default, flatten)]
+    pub traits: TraitConfig,
 }
 
 impl PersonaConfig {
-    pub fn to_persona(&self, generation: u32) -> Persona {
-        Persona {
+    pub fn to_persona(&self, generation: u32) -> Result<Persona> {
+        let traits = self.traits.resolve(&format!("persona `{}`", self.name))?;
+        let base = self.temperature.unwrap_or(0.8);
+        Ok(Persona {
             id: format!("{}-{}", self.role.short(), slug(&self.name)),
             name: self.name.clone(),
             role: self.role,
             prompt: self.prompt.clone(),
             focus: self.focus.clone(),
-            temperature: self.temperature.unwrap_or(0.8),
+            // An explicit temperature is taken literally; otherwise temperament
+            // nudges it.
+            temperature: match self.temperature {
+                Some(t) => t,
+                None => traits.temperature(base),
+            },
+            traits,
             generation,
             parent: None,
             origin: Origin::Seed,
-        }
+        })
     }
 }
 
@@ -532,6 +631,27 @@ impl Config {
                 bail!("[run] providers lists `{name}`, which is not configured");
             }
         }
+        let mut judge_names = std::collections::HashSet::new();
+        for j in &self.judges {
+            if !judge_names.insert(&j.name) {
+                bail!("duplicate judge name `{}`", j.name);
+            }
+            if j.weight < 0.0 {
+                bail!("judge `{}`: weight must not be negative", j.name);
+            }
+            if let Some(p) = &j.provider {
+                if !self.providers.iter().any(|c| &c.name == p) {
+                    bail!("judge `{}` names provider `{p}`, which is not configured", j.name);
+                }
+            }
+            j.to_judge()?;
+        }
+        if !self.judges.is_empty() && self.judges.iter().all(|j| j.weight <= 0.0) {
+            bail!("every judge has zero weight; at least one vote has to count");
+        }
+        for p in &self.personas {
+            p.to_persona(0)?;
+        }
         if self.arena.attackers == 0 {
             bail!("[arena] attackers must be at least 1");
         }
@@ -554,19 +674,26 @@ impl Config {
     }
 
     /// Seed personas, falling back to the built-in library when the config
-    /// declares none.
-    pub fn seed_personas(&self, role: Role) -> Vec<Persona> {
+    /// declares none of that role.
+    pub fn seed_personas(&self, role: Role) -> Result<Vec<Persona>> {
         let configured: Vec<Persona> = self
             .personas
             .iter()
             .filter(|p| p.role == role)
             .map(|p| p.to_persona(0))
-            .collect();
-        if configured.is_empty() {
-            crate::seeds::library(role)
-        } else {
-            configured
+            .collect::<Result<_>>()?;
+        Ok(if configured.is_empty() { crate::seeds::library(role) } else { configured })
+    }
+
+    /// The judging panel. Three contrasting temperaments by default: a finding
+    /// confirmed by all three survived three different standards of proof,
+    /// while one only the stickler confirms is a nitpick. Declare `[[judge]]`
+    /// to replace them, including with a single judge.
+    pub fn panel(&self) -> Result<Vec<Judge>> {
+        if self.judges.is_empty() {
+            return Ok(crate::seeds::default_panel());
         }
+        self.judges.iter().map(|j| j.to_judge()).collect()
     }
 }
 
@@ -632,6 +759,7 @@ mod tests {
             prompt: "You review every change as though it will be half-deployed.".into(),
             focus: "deploy windows".into(),
             temperature: Some(0.7),
+            traits: TraitConfig { neuroticism: Some(0.85), ..Default::default() },
         });
 
         let text = toml::to_string_pretty(&cfg).expect("config must serialise to TOML");
@@ -653,6 +781,96 @@ mod tests {
         // A typo in a config key should be an error, not a silently ignored
         // setting that makes the run behave differently than the file says.
         assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    /// `JudgeConfig` and `PersonaConfig` combine `deny_unknown_fields` with
+    /// `#[serde(flatten)]` for the traits. serde documents that pairing as
+    /// unsupported in general, so both halves are pinned here: valid axes must
+    /// flatten through, and a misspelled one must be an error rather than a
+    /// silently neutral judge.
+    #[test]
+    fn trait_axes_flatten_in_and_typos_still_fail() {
+        let base = "[[provider]]\nname = \"anthropic\"\nkind = \"api\"\nwire = \"anthropic\"\n";
+
+        let good: Config = toml::from_str(&format!(
+            "{base}\n[[judge]]\nname = \"anxious\"\npreset = \"skeptic\"\nneuroticism = 0.9\nweight = 2.0\n"
+        ))
+        .expect("valid axes must flatten through");
+        let judge = good.judges[0].to_judge().unwrap();
+        assert_eq!(judge.weight, 2.0);
+        assert_eq!(judge.traits.neuroticism, 0.9);
+        // The preset supplies the axes the config did not override.
+        assert_eq!(judge.traits.agreeableness, Traits::preset("skeptic").unwrap().agreeableness);
+
+        for bad in [
+            "[[judge]]\nname = \"x\"\nneurotisism = 0.9\n",
+            "[[persona]]\nname = \"x\"\nrole = \"attacker\"\nprompt = \"p\"\nopeness = 0.9\n",
+        ] {
+            assert!(
+                toml::from_str::<Config>(&format!("{base}\n{bad}")).is_err(),
+                "a misspelled trait must not be silently ignored: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_and_unknown_presets_are_rejected() {
+        let judge = JudgeConfig {
+            name: "x".into(),
+            provider: None,
+            weight: 1.0,
+            traits: TraitConfig { neuroticism: Some(1.5), ..Default::default() },
+        };
+        assert!(judge.to_judge().is_err(), "1.5 is not a valid trait value");
+
+        let judge = JudgeConfig {
+            name: "x".into(),
+            provider: None,
+            weight: 1.0,
+            traits: TraitConfig { preset: Some("grumpy".into()), ..Default::default() },
+        };
+        let err = judge.to_judge().unwrap_err().to_string();
+        assert!(err.contains("unknown trait preset"), "got: {err}");
+    }
+
+    #[test]
+    fn the_default_panel_is_three_contrasting_judges() {
+        let cfg = Config::default();
+        let panel = cfg.panel().unwrap();
+        assert_eq!(panel.len(), 3);
+        assert!(panel.iter().all(|j| !j.traits.is_neutral()), "a neutral panel measures nothing");
+        // They must actually differ, or the spread is meaningless.
+        assert_ne!(panel[0].traits, panel[1].traits);
+        assert_ne!(panel[1].traits, panel[2].traits);
+    }
+
+    #[test]
+    fn a_judge_naming_a_missing_provider_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.judges.push(JudgeConfig {
+            name: "pinned".into(),
+            provider: Some("nowhere".into()),
+            weight: 1.0,
+            traits: TraitConfig::default(),
+        });
+        assert!(cfg.validate().is_err());
+        cfg.judges[0].provider = Some("anthropic".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn a_panel_where_no_vote_counts_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.judges.push(JudgeConfig {
+            name: "mute".into(),
+            provider: None,
+            weight: 0.0,
+            traits: TraitConfig::default(),
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("at least one vote has to count"), "got: {err}");
     }
 
     #[test]

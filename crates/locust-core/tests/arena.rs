@@ -104,13 +104,21 @@ impl Provider for Scripted {
         }
 
         let text = if req.system.contains("adjudicating a code review") {
+            // A judge's temperament reaches the prompt as trait text; use it to
+            // make the scripted panel actually disagree.
+            let verdict = if req.system.contains("Be adversarial") {
+                "refuted"
+            } else if req.system.contains("Treat uncertainty as danger") {
+                "confirmed"
+            } else {
+                self.verdict
+            };
             // Judge: rule on exactly the ids in the case file.
             let rulings: Vec<String> = ids_in(&req.prompt, "#### ")
                 .into_iter()
                 .map(|(id, altitude)| {
                     format!(
-                        r#"{{"finding_id":"{id}","verdict":"{}","severity":"high","altitude":"{altitude}","reasoning":"scripted","novel":true}}"#,
-                        self.verdict
+                        r#"{{"finding_id":"{id}","verdict":"{verdict}","severity":"high","altitude":"{altitude}","reasoning":"scripted","novel":true}}"#
                     )
                 })
                 .collect();
@@ -496,6 +504,109 @@ async fn a_mutant_that_reuses_its_parents_name_is_renamed_not_dropped() -> Resul
         g1.iter().any(|p| p.origin == locust_core::model::Origin::Mutant),
         "the rewritten prompt was kept, not discarded: {names:?}"
     );
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// The whole point of a panel: one judge's verdict is unfalsifiable, three
+/// contrasting temperaments turn the spread into a measurement.
+#[tokio::test]
+async fn a_split_panel_records_who_dissented_and_why() -> Result<()> {
+    use locust_core::config::{JudgeConfig, TraitConfig};
+
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha"]);
+    cfg.arena.judge = None;
+    cfg.judges = vec![
+        // Refutes everything (very low agreeableness).
+        JudgeConfig {
+            name: "skeptic".into(),
+            provider: None,
+            weight: 1.0,
+            traits: TraitConfig { preset: Some("skeptic".into()), ..Default::default() },
+        },
+        // Confirms everything (very high neuroticism).
+        JudgeConfig {
+            name: "paranoid".into(),
+            provider: None,
+            weight: 1.0,
+            traits: TraitConfig { preset: Some("paranoid".into()), ..Default::default() },
+        },
+        // Falls back to the scripted default, which confirms.
+        JudgeConfig {
+            name: "neutral".into(),
+            provider: None,
+            weight: 1.0,
+            traits: TraitConfig::default(),
+        },
+    ];
+
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+    ));
+
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
+    let outcome = arena.run().await?;
+    let gen = &outcome.generations[0];
+
+    let ruling = gen.rulings.first().expect("a ruling was produced");
+    assert_eq!(ruling.panel.len(), 3, "every judge voted");
+    assert_eq!(ruling.raw.verdict, Verdict::Confirmed, "2 of 3 confirmed");
+    assert!(!ruling.unanimous(), "the skeptic dissented");
+    assert_eq!(ruling.tally(), (2, 3));
+    assert!((ruling.dissent - 1.0 / 3.0).abs() < 1e-9);
+    assert!(
+        ruling.panel.iter().any(|v| v.judge == "skeptic" && v.raw.verdict == Verdict::Refuted),
+        "the dissent is attributable to a named judge"
+    );
+
+    // A contested finding scores less than a unanimous one would.
+    let fit = gen.fitness.iter().find(|f| f.confirmed > 0).expect("someone scored");
+    assert!(fit.score > 0.0);
+
+    let md = locust_core::report::markdown(&outcome, &cfg);
+    assert!(md.contains("Where the panel split"), "the disagreement is reported");
+    assert!(md.contains("skeptic"));
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// Dropping to one judge must restore exactly the old behaviour.
+#[tokio::test]
+async fn a_single_judge_panel_is_unanimous_by_definition() -> Result<()> {
+    use locust_core::config::{JudgeConfig, TraitConfig};
+
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha"]);
+    cfg.judges = vec![JudgeConfig {
+        name: "solo".into(),
+        provider: Some("alpha".into()),
+        weight: 1.0,
+        traits: TraitConfig::default(),
+    }];
+
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+    ));
+
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
+    let outcome = arena.run().await?;
+    let gen = &outcome.generations[0];
+
+    assert!(!gen.rulings.is_empty());
+    for r in &gen.rulings {
+        assert_eq!(r.panel.len(), 1);
+        assert!(r.unanimous());
+        assert_eq!(r.dissent, 0.0);
+    }
+    let md = locust_core::report::markdown(&outcome, &cfg);
+    assert!(!md.contains("Where the panel split"), "nothing to split with one judge");
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())

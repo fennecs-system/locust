@@ -89,10 +89,22 @@ enum Command {
         full: bool,
     },
 
+    /// Show the judging panel and what each temperament does.
+    Judges {
+        /// Show the prompt text each judge's traits produce.
+        #[arg(long)]
+        full: bool,
+    },
+
     /// Print the report from a previous run.
     Report {
         /// Run id. Defaults to the most recent.
         run: Option<String>,
+        /// Rebuild the report from the run's stored data instead of reading the
+        /// markdown it wrote at the time. Lets an improved report format apply
+        /// to runs that already happened.
+        #[arg(long)]
+        render: bool,
     },
 
     /// Remove agent worktrees left behind by an interrupted run.
@@ -132,7 +144,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
 
-        Command::Report { run } => report(&repo, run.as_deref()),
+        Command::Report { run, render } => report(&repo, run.as_deref(), render),
 
         Command::Providers => {
             let cfg = load_config(&cli.config, &repo)?;
@@ -142,6 +154,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Personas { full } => {
             let cfg = load_config(&cli.config, &repo)?;
             personas(&cfg, full)
+        }
+
+        Command::Judges { full } => {
+            let cfg = load_config(&cli.config, &repo)?;
+            judges(&cfg, full)
         }
 
         Command::Review {
@@ -258,7 +275,12 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     let provider_names: Vec<&str> =
         cfg.active_providers().iter().map(|p| p.name.as_str()).collect();
     println!("  providers   {}", provider_names.join(", "));
-    println!("  judge       {}", cfg.arena.judge.as_deref().unwrap_or("rotating, excluding authors"));
+    let panel = cfg.panel()?;
+    println!(
+        "  judges      {} ({})",
+        panel.iter().map(|j| format!("{} {}", j.name, j.traits)).collect::<Vec<_>>().join(", "),
+        cfg.arena.judge.as_deref().unwrap_or("rotating, excluding authors")
+    );
     println!("  generations {}", cfg.run.generations);
     println!("  population  {} attackers, {} defenders", cfg.arena.attackers, cfg.arena.defenders);
     println!("  evolution   {}", locust_core::evolution::describe(&cfg.evolution));
@@ -271,7 +293,8 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     let assumed_findings = cfg.arena.attackers * 2;
     let batches = assumed_findings.div_ceil(cfg.arena.judge_batch.max(1)).max(1);
     let defends = cfg.arena.defenders * batches * g;
-    let judges = batches * g;
+    // Every judge on the panel rules on every batch.
+    let judges = batches * g * panel.len().max(1);
     let breeding = if cfg.evolution.enabled {
         (cfg.evolution.mutants + cfg.evolution.crossovers) * g.saturating_sub(1)
     } else {
@@ -282,7 +305,11 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     println!("{}", term::bold("estimated model calls"));
     println!("  attack      {attacks}");
     println!("  defend      ~{defends}");
-    println!("  judge       ~{judges}");
+    println!("  judge       ~{judges}{}", if panel.len() > 1 {
+        format!("  ({} judges × ~{} batches × {g} generations)", panel.len(), batches)
+    } else {
+        String::new()
+    });
     if breeding > 0 {
         println!("  breeding    {breeding}");
     }
@@ -325,9 +352,66 @@ fn providers(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn judges(cfg: &Config, full: bool) -> Result<()> {
+    use locust_core::traits::{Axis, Voice};
+
+    let panel = cfg.panel()?;
+    let source = if cfg.judges.is_empty() { "built-in panel" } else { "from locust.toml" };
+    println!("{} {}", term::bold("judges"), term::dim(source));
+
+    if panel.len() == 1 {
+        println!(
+            "  {}",
+            term::dim("one judge: verdicts are final and there is no disagreement to measure")
+        );
+    }
+
+    for j in &panel {
+        let provider = j.provider.as_deref().unwrap_or("rotating");
+        println!(
+            "\n  {:<14} {:<22} {}",
+            term::bold(&j.name),
+            term::cyan(&j.traits.to_string()),
+            term::dim(&format!("{provider}, weight {:.1}", j.weight))
+        );
+        for axis in Axis::ALL {
+            let v = j.traits.get(axis);
+            println!("      {:<18} {} {:.2}", axis.name(), bar(v), v);
+        }
+        if full {
+            let text = j.traits.render(Voice::Judge);
+            if text.trim().is_empty() {
+                println!("\n      {}", term::dim("neutral — no temperament text is added"));
+            } else {
+                println!();
+                for line in text.lines() {
+                    println!("      {line}");
+                }
+            }
+        }
+    }
+
+    println!(
+        "\n{}",
+        term::dim(&format!("presets: {}", locust_core::Traits::PRESETS.join(", ")))
+    );
+    Ok(())
+}
+
+/// Ten-cell meter. The middle two cells are the neutral band, where a trait
+/// contributes no prompt text at all.
+fn bar(v: f64) -> String {
+    let filled = (v * 10.0).round() as usize;
+    let mut out = String::new();
+    for i in 0..10 {
+        out.push(if i < filled { '#' } else { '.' });
+    }
+    out
+}
+
 fn personas(cfg: &Config, full: bool) -> Result<()> {
     for role in [Role::Attacker, Role::Defender] {
-        let list = cfg.seed_personas(role);
+        let list = cfg.seed_personas(role)?;
         let source = if cfg.personas.iter().any(|p| p.role == role) {
             "from locust.toml"
         } else {
@@ -335,7 +419,12 @@ fn personas(cfg: &Config, full: bool) -> Result<()> {
         };
         println!("\n{} {}", term::bold(&format!("{role:?}s").to_lowercase()), term::dim(source));
         for p in list {
-            println!("  {:<22} {}", term::bold(&p.name), term::dim(&p.focus));
+            let temperament = if p.traits.is_neutral() {
+                String::new()
+            } else {
+                format!("  {}", term::cyan(&p.traits.to_string()))
+            };
+            println!("  {:<22} {}{temperament}", term::bold(&p.name), term::dim(&p.focus));
             if full {
                 for line in p.prompt.lines() {
                     println!("      {line}");
@@ -347,11 +436,24 @@ fn personas(cfg: &Config, full: bool) -> Result<()> {
     Ok(())
 }
 
-fn report(repo: &std::path::Path, run: Option<&str>) -> Result<()> {
+fn report(repo: &std::path::Path, run: Option<&str>, render: bool) -> Result<()> {
     let dir = match run {
         Some(id) => repo.join(".locust").join("runs").join(id),
         None => store::latest_run(repo).context("no runs found under .locust/runs")?,
     };
+
+    if render {
+        let json = dir.join("report.json");
+        let text = std::fs::read_to_string(&json)
+            .with_context(|| format!("no run data at {}", json.display()))?;
+        let outcome: locust_core::RunOutcome = serde_json::from_str(&text)
+            .with_context(|| format!("parsing {}", json.display()))?;
+        // The run's own config, so the rebuilt report matches how it was run.
+        let cfg = Config::load(&dir.join("config.toml")).unwrap_or_default();
+        println!("{}", locust_core::report::markdown(&outcome, &cfg));
+        return Ok(());
+    }
+
     let md = dir.join("report.md");
     let text = std::fs::read_to_string(&md)
         .with_context(|| format!("no report at {}", md.display()))?;

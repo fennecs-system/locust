@@ -28,7 +28,9 @@ pub mod report;
 pub mod scoring;
 pub mod seeds;
 pub mod store;
+pub mod traits;
 
 pub use arena::{Arena, Event, Reporter};
 pub use config::Config;
-pub use model::{Finding, RunOutcome, Theme, Verdict};
+pub use model::{Finding, Judge, RunOutcome, Theme, Verdict};
+pub use traits::Traits;

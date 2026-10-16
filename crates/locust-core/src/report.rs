@@ -84,8 +84,40 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
             if !f.raw.evidence.trim().is_empty() {
                 let _ = writeln!(s, "```\n{}\n```\n", f.raw.evidence.trim());
             }
+            if !r.panel.is_empty() {
+                let (backing, total) = r.tally();
+                let verdict = r.raw.verdict;
+                let votes: Vec<String> = r
+                    .panel
+                    .iter()
+                    .map(|v| {
+                        let mark = if v.raw.verdict == verdict { "" } else { " ✗" };
+                        format!(
+                            "{}{mark} ({}, {})",
+                            v.judge,
+                            v.raw.verdict,
+                            v.provider
+                        )
+                    })
+                    .collect();
+                let mut notes = Vec::new();
+                if r.severity_spread() > 0 {
+                    notes.push(format!("split {} steps on severity", r.severity_spread()));
+                }
+                if r.altitude_spread() > 0 {
+                    notes.push(format!("split {} steps on altitude", r.altitude_spread()));
+                }
+                let suffix =
+                    if notes.is_empty() { String::new() } else { format!(" — {}", notes.join(", ")) };
+                let headline = if r.unanimous() {
+                    format!("**Panel: unanimous on the verdict ({total}/{total}){suffix}.**")
+                } else {
+                    format!("**Panel: {backing}/{total}, contested{suffix}.**")
+                };
+                let _ = writeln!(s, "{headline} {}\n", votes.join(" · "));
+            }
             if !r.raw.reasoning.trim().is_empty() {
-                let _ = writeln!(s, "<sub>Judge ({}): {}</sub>\n", r.judge_provider, r.raw.reasoning.trim());
+                let _ = writeln!(s, "<sub>{}</sub>\n", r.raw.reasoning.trim().replace('\n', "<br>"));
             }
             let _ = writeln!(s, "<sub>`{}`</sub>\n", f.id);
         }
@@ -117,6 +149,53 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
             );
         }
         let _ = writeln!(s, "\n</details>\n");
+    }
+
+    let contested: Vec<_> = outcome
+        .generations
+        .iter()
+        .flat_map(|g| {
+            g.rulings.iter().filter(|r| r.contested()).filter_map(move |r| {
+                g.findings.iter().find(|f| f.id == r.raw.finding_id).map(|f| (f, r))
+            })
+        })
+        .collect();
+
+    if !contested.is_empty() {
+        let _ = writeln!(s, "## Where the panel split\n");
+        let _ = writeln!(
+            s,
+            "Findings the panel did not fully agree on — the verdict, how serious it is, or how \
+             far from a single line it lives. A finding only the strictest judge confirmed is \
+             usually a nitpick; one only the lenient judge refuted may be worth a second look; \
+             and two judges who agree a defect is real while disagreeing two steps on severity \
+             are telling you the blast radius is genuinely unclear. A single judge would have \
+             hidden all of it behind one confident verdict.\n"
+        );
+        for (f, r) in &contested {
+            let (backing, total) = r.tally();
+            let _ = writeln!(
+                s,
+                "**`{}`** {} — ruled **{}** {backing}/{total}",
+                f.location(),
+                f.raw.title,
+                r.raw.verdict
+            );
+            for v in &r.panel {
+                let _ = writeln!(
+                    s,
+                    "- `{}` _{}_ — **{}** ({} / {}, via {}) — {}",
+                    v.judge,
+                    v.traits.summary(),
+                    v.raw.verdict,
+                    v.raw.severity,
+                    v.raw.altitude,
+                    v.provider,
+                    v.raw.reasoning.trim()
+                );
+            }
+            let _ = writeln!(s);
+        }
     }
 
     let _ = writeln!(s, "## Arena\n");
@@ -161,6 +240,37 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
             at(Altitude::Module),
             at(Altitude::Architectural),
         );
+    }
+
+    if let Some(gen) = outcome.generations.first() {
+        if let Some(ruling) = gen.rulings.iter().find(|r| !r.panel.is_empty()) {
+            if ruling.panel.len() > 1 {
+                let _ = writeln!(s, "\n### Judging panel\n");
+                for v in &ruling.panel {
+                    let _ = writeln!(s, "- **{}** `{}` — weight {:.1}", v.judge, v.traits, v.weight);
+                }
+                let unanimous: usize = outcome
+                    .generations
+                    .iter()
+                    .flat_map(|g| g.rulings.iter())
+                    .filter(|r| !r.panel.is_empty() && !r.contested())
+                    .count();
+                let total: usize = outcome
+                    .generations
+                    .iter()
+                    .flat_map(|g| g.rulings.iter())
+                    .filter(|r| !r.panel.is_empty())
+                    .count();
+                if total > 0 {
+                    let _ = writeln!(
+                        s,
+                        "\n{unanimous} of {total} rulings had the panel in full agreement \
+                         ({:.0}%) — same verdict, same severity, same altitude.",
+                        unanimous as f64 / total as f64 * 100.0
+                    );
+                }
+            }
+        }
     }
 
     if cfg.evolution.enabled && outcome.generations.len() > 1 {

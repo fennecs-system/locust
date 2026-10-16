@@ -140,9 +140,13 @@ fn render(found: &Detected) -> String {
          defenders = 3\n\n\
          # Findings per defender and judge call. Smaller batches reason better and cost more.\n\
          judge_batch = 8\n\n\
-         # Leave `judge` unset to rotate judging across providers, always picking one that\n\
-         # did not author the findings in the batch. Models prefer their own output, and a\n\
-         # judge ruling on its own findings turns the tournament into a popularity contest.\n\
+         # Who the judges *are* is the [[judge]] panel further down; this setting is only\n\
+         # about which provider carries their votes. Left unset, each judge rotates across\n\
+         # providers that authored none of the findings in front of it -- models prefer\n\
+         # their own output, and a judge ruling on its own agents' findings turns the\n\
+         # tournament into a popularity contest between vendors. Setting it pins the whole\n\
+         # panel to one provider, which keeps temperament diversity but loses vendor\n\
+         # diversity.\n\
          judge_excludes_author = true\n\
          {}judge = \"{}\"\n",
         if found.api.len() + found.clis.len() > 1 { "# " } else { "" },
@@ -181,7 +185,10 @@ fn render(found: &Detected) -> String {
          corroboration_bonus = 0.5\n\n\
          # Applied when the judge rules a finding a restatement of a settled one.\n\
          stale_penalty = -1.0\n\
-         severity_weighted = true\n",
+         severity_weighted = true\n\n\
+         # How much a split panel discounts a finding. 0.0 ignores dissent; 1.0 scores a\n\
+         # finding purely by the share of panel weight behind it. Does nothing with one judge.\n\
+         consensus_weight = 0.5\n",
     );
 
     s.push_str(
@@ -206,6 +213,55 @@ fn render(found: &Detected) -> String {
          # cleanup are reported as one issue about where this code puts its cleanup.\n\
          enabled = true\n\
          max_themes = 8\n",
+    );
+
+    s.push_str(
+        "\n# --- judges ------------------------------------------------------------\n\
+         #\n\
+         # Judges have temperament, expressed as Big Five (OCEAN) traits in 0.0-1.0.\n\
+         # `locust judges` prints the panel; `locust judges --full` prints the prompt text\n\
+         # each temperament produces.\n\
+         #\n\
+         #   openness           structural argument vs. demand a reproduction\n\
+         #   conscientiousness  audit every claim vs. judge on overall plausibility\n\
+         #   extraversion       weigh the debate vs. ignore it and re-read the code\n\
+         #   agreeableness      benefit of the doubt vs. guilty until proven\n\
+         #   neuroticism        a possible failure is inevitable vs. dismiss hypotheticals\n\
+         #\n\
+         # 0.5 is neutral and adds no prompt text at all, so a trait you do not set costs\n\
+         # you nothing. The band around 0.5 is deliberately wide: 0.6 still reads as\n\
+         # neutral, so you have to mean it before a judge changes behaviour.\n\
+         #\n\
+         # The default panel is three contrasting temperaments, below. A finding all three\n\
+         # confirm cleared three different bars; one only `stickler` confirms is a nitpick;\n\
+         # one only `pragmatist` refuted may be worth a second look. That spread is the\n\
+         # whole reason to run more than one judge, and it is reported under 'Where the\n\
+         # panel split'. Delete two of these to go back to a single judge and a third of\n\
+         # the judging cost.\n\
+         #\n\
+         # Presets: neutral, stickler, pragmatist, architect, paranoid, skeptic, advocate.\n\n",
+    );
+
+    for (name, note) in [
+        ("stickler", "audits every claim, wants the evidence quoted, assumes the reviewer is wrong"),
+        ("pragmatist", "asks whether anyone will actually be hurt; deflates hypotheticals"),
+        ("architect", "will confirm a structural claim on the strength of the argument alone"),
+    ] {
+        let _ = writeln!(s, "# {note}\n[[judge]]\nname = \"{name}\"\npreset = \"{name}\"\n");
+    }
+
+    s.push_str(
+        "# Override individual axes on top of a preset, or skip the preset entirely.\n\
+         # `provider` pins a judge to one model; left unset, judges rotate across providers\n\
+         # that authored none of the findings they are ruling on -- so a three-judge panel\n\
+         # over three providers gets temperament diversity and vendor diversity at once.\n\
+         #\n\
+         # [[judge]]\n\
+         # name = \"release gate\"\n\
+         # provider = \"anthropic\"\n\
+         # weight = 2.0            # counts double in the vote\n\
+         # preset = \"skeptic\"\n\
+         # neuroticism = 0.9       # ... but anxious about what it does confirm\n\n",
     );
 
     s.push_str("\n# --- providers ---------------------------------------------------------\n");
@@ -299,11 +355,18 @@ fn render(found: &Detected) -> String {
          # where your team's review standards live, in version control next to the code\n\
          # they apply to. A persona is a point of view, not a checklist.\n\
          #\n\
+         # Reviewers take the same OCEAN traits as judges, read in a reviewer's voice:\n\
+         # agreeableness is how readily it gives the author the benefit of the doubt,\n\
+         # neuroticism is how much a rare failure path worries it. The built-in library is\n\
+         # neutral on purpose -- those prompts were written to stand alone, and a trait\n\
+         # paragraph bolted on would compete with them rather than sharpen them.\n\
+         #\n\
          # [[persona]]\n\
          # role = \"attacker\"\n\
          # name = \"migration safety\"\n\
          # focus = \"changes that are unsafe while both versions are deployed\"\n\
-         # temperature = 0.7\n\
+         # neuroticism = 0.85        # a possible window is an inevitable one\n\
+         # agreeableness = 0.2       # assumes nothing was thought through\n\
          # prompt = \"\"\"\n\
          # You review every change as though it will be half-deployed for twenty minutes.\n\
          # Old and new code run at once against one database.\n\

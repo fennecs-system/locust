@@ -299,6 +299,8 @@ mod tests {
             },
             judge_provider: "j".into(),
             generation: 0,
+            panel: Vec::new(),
+            dissent: 0.0,
         }
     }
 

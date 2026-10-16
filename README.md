@@ -30,9 +30,9 @@ locust review        # run the arena
               ↓  23 distinct claims
   defend    3 defenders refute, narrow or concede each one
               ↓
-  judge     a provider that authored none of them rules on each,
-            and merges repeats the token overlap missed
-              ↓  9 confirmed
+  judge     a panel of three temperaments rules on each independently;
+            a provider that authored none of them carries each vote
+              ↓  9 confirmed, 2 of them contested
   score     persona fitness = what survived, weighted by severity × altitude
               ↓
   breed     elites carried over, winners rewritten, losers culled
@@ -66,14 +66,89 @@ Taken together, a persona that only produces style remarks has its findings
 refuted by defenders, scores negative, and is culled — while the prompts that
 found something real get rewritten against their own scorecard and bred forward.
 
+## Judges have temperament
+
+One judge's verdict is unfalsifiable. You cannot tell a finding that is
+genuinely solid from one that happened to catch a lenient judge, because the
+verdict looks identical either way.
+
+So judging is a panel, and the judges disagree on purpose. Each carries a Big
+Five (OCEAN) temperament in `0.0..=1.0`:
+
+| trait | low | high |
+|---|---|---|
+| **openness** | demands a reproduction; a design critique with no named failure is an opinion | confirms a structural claim on the argument alone; promotes altitude |
+| **conscientiousness** | judges on overall plausibility | audits every claim against the quoted code, line by line |
+| **extraversion** | ignores the rhetoric and re-reads the source | treats the debate as the evidence; a case argued well and answered weakly has been won |
+| **agreeableness** | guilty until proven; an uncarried claim is refuted, not undecided | benefit of the doubt; a false positive costs five minutes, a false negative ships the bug |
+| **neuroticism** | dismisses hypotheticals; rates severity by expected impact | a possible failure path is an inevitable one; rates severity for the bad case |
+
+Three contrasting judges ship by default — `stickler`, `pragmatist`,
+`architect` — and the **spread is the output**:
+
+```
+f0-1-2  connection leak on the error path
+  stickler    CONFIRMED  high      ← even the auditor couldn't fault it
+  pragmatist  CONFIRMED  medium
+  architect   CONFIRMED  high
+  → confirmed, unanimous
+
+f0-0-4  magic number should be a constant
+  stickler    CONFIRMED  low       ← only the pedant cared
+  pragmatist  REFUTED
+  architect   REFUTED
+  → refuted, 1/3 dissent
+```
+
+A finding all three confirm cleared three genuinely different bars. One only
+`stickler` confirms is a nitpick. One only `pragmatist` refuted is worth a
+second look. The report has a **Where the panel split** section for exactly
+this, and `[scoring] consensus_weight` makes a contested confirmation score
+less than a unanimous one.
+
+`locust judges` prints the panel; `--full` prints the prompt text each
+temperament produces.
+
+**0.5 is neutral and emits nothing.** The band around it is deliberately wide —
+0.6 still reads as neutral — so you have to mean it before a judge changes
+behaviour, and a persona that sets no traits reads exactly as it did before
+traits existed. Presets: `neutral`, `stickler`, `pragmatist`, `architect`,
+`paranoid`, `skeptic`, `advocate`.
+
+```toml
+[[judge]]
+name = "release gate"
+preset = "skeptic"
+neuroticism = 0.9      # ... but anxious about what it does confirm
+provider = "anthropic" # unset = rotate across non-authoring providers
+weight = 2.0           # counts double in the vote
+```
+
+Delete two of the three default judges to go back to a single judge and a third
+of the judging cost. With one judge there is never any dissent, and everything
+above does nothing.
+
+Reviewers take the same traits, read in a reviewer's voice — agreeableness
+becomes how readily it gives the author the benefit of the doubt, neuroticism
+how much a rare failure path worries it. The built-in reviewer library stays
+neutral on purpose: those prompts were written to stand alone, and a trait
+paragraph bolted on would compete with them rather than sharpen them.
+
+Evolution rewrites prose, not traits. A mutant inherits its parent's
+temperament and a crossover takes the midpoint of its two parents', so a
+reviewer you calibrated by hand keeps that calibration across generations
+instead of having it drift under selection.
+
 ## Why multiple providers
 
 Two reasons, and only the second is about quality of ideas.
 
 **Judging.** Models prefer their own output. A model judging findings its own
 agents raised grades them generously, and the whole tournament quietly becomes a
-popularity contest. By default locust routes each batch of findings to a
-provider that authored none of them (`judge_excludes_author`).
+popularity contest. By default each judge's vote is carried by a provider that
+authored none of the findings in front of it (`judge_excludes_author`), with the
+rotation offset per judge — so a three-judge panel over three providers gets
+temperament diversity and vendor diversity from one configuration.
 
 **Corroboration.** When two vendors independently raise the same finding, that
 is weak evidence it is real — they have different training data and different
@@ -167,7 +242,9 @@ locust review                    run the arena
   --fail-on high                 exit non-zero on a confirmed finding at this severity
 locust providers                 configured providers and whether they are reachable
 locust personas [--full]         the reviewer population
-locust report [RUN]              re-print a previous run
+locust judges [--full]           the judging panel and what each temperament does
+locust report [RUN] [--render]   re-print a previous run; --render rebuilds it
+                                 from stored data with the current format
 locust clean                     remove worktrees from an interrupted run
 ```
 
@@ -204,6 +281,7 @@ undecided       +0.25
 duplicate       +0.3    independently rediscovered something already confirmed
 corroboration   +0.5    per extra provider that reached it independently
 stale           −1.0    a restatement of something already settled
+consensus       ×       scaled by panel agreement (consensus_weight, default 0.5)
 ```
 
 A duplicate inherits its cluster's verdict. Rediscovering something **true**

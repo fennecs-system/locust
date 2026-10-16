@@ -88,7 +88,11 @@ pub fn score_generation(
                 out[i].confirmed += 1;
                 let severity_w =
                     if cfg.severity_weighted { ruling.raw.severity.weight() } else { 1.0 };
-                let mut points = cfg.confirmed * severity_w * altitude_w;
+                // A finding two of three judges refused is worth less than one
+                // the whole panel backed. Without this the panel is just a
+                // majority vote and the spread it measures is thrown away.
+                let consensus = 1.0 - ruling.dissent * cfg.consensus_weight;
+                let mut points = cfg.confirmed * severity_w * altitude_w * consensus.max(0.0);
                 // Extra providers beyond the first that found it independently.
                 points += cfg.corroboration_bonus * f.corroboration.saturating_sub(1) as f64;
                 if !ruling.raw.novel {
@@ -141,6 +145,7 @@ mod tests {
             prompt: String::new(),
             focus: String::new(),
             temperature: 0.8,
+            traits: Default::default(),
             generation: 0,
             parent: None,
             origin: Origin::Seed,
@@ -185,7 +190,13 @@ mod tests {
             },
             judge_provider: "j".into(),
             generation: 0,
+            panel: Vec::new(),
+            dissent: 0.0,
         }
+    }
+
+    fn contested(id: &str, verdict: Verdict, altitude: Altitude, dissent: f64) -> Ruling {
+        Ruling { dissent, ..ruling(id, verdict, altitude) }
     }
 
     #[test]
@@ -310,6 +321,42 @@ mod tests {
         ];
         let scores = score_generation(&cfg, &ps, &findings, &rulings, 0.0);
         assert!((scores[0].precision - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_split_panel_is_worth_less_than_a_unanimous_one() {
+        let cfg = ScoringConfig::default();
+        let ps = vec![persona("p")];
+        let findings = vec![finding("f1", "p", Altitude::Local)];
+
+        let unanimous =
+            score_generation(&cfg, &ps, &findings, &[ruling("f1", Verdict::Confirmed, Altitude::Local)], 0.5);
+        let split = score_generation(
+            &cfg,
+            &ps,
+            &findings,
+            &[contested("f1", Verdict::Confirmed, Altitude::Local, 1.0 / 3.0)],
+            0.5,
+        );
+        assert!(split[0].score < unanimous[0].score);
+        assert!(split[0].score > 0.0, "a contested confirmation still counts for something");
+    }
+
+    #[test]
+    fn consensus_weight_zero_restores_single_judge_behaviour() {
+        let cfg = ScoringConfig { consensus_weight: 0.0, ..ScoringConfig::default() };
+        let ps = vec![persona("p")];
+        let findings = vec![finding("f1", "p", Altitude::Local)];
+        let unanimous =
+            score_generation(&cfg, &ps, &findings, &[ruling("f1", Verdict::Confirmed, Altitude::Local)], 0.5);
+        let split = score_generation(
+            &cfg,
+            &ps,
+            &findings,
+            &[contested("f1", Verdict::Confirmed, Altitude::Local, 0.5)],
+            0.5,
+        );
+        assert_eq!(split[0].score, unanimous[0].score);
     }
 
     #[test]

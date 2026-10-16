@@ -1,6 +1,7 @@
 //! The domain: what agents produce, how it is adjudicated, and how the
 //! personas that produced it are scored.
 
+use crate::traits::Traits;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -257,12 +258,245 @@ pub struct JudgeReport {
     pub rulings: Vec<RawRuling>,
 }
 
+/// One judge's opinion within a panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JudgeVote {
+    pub judge: String,
+    pub provider: String,
+    pub traits: Traits,
+    pub weight: f64,
+    #[serde(flatten)]
+    pub raw: RawRuling,
+}
+
+/// The panel's decision on one finding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ruling {
     #[serde(flatten)]
     pub raw: RawRuling,
     pub judge_provider: String,
     pub generation: u32,
+    /// Every judge's individual vote. A single-judge panel has one entry.
+    #[serde(default)]
+    pub panel: Vec<JudgeVote>,
+    /// Share of panel weight that did **not** back the winning verdict.
+    /// `0.0` is unanimous. This is the number that distinguishes a finding
+    /// which survived three different standards of proof from one that caught
+    /// a single lenient judge.
+    #[serde(default)]
+    pub dissent: f64,
+}
+
+impl Ruling {
+    /// Decide a finding from the panel's votes.
+    ///
+    /// Plurality by weight, ties falling to `undecided` — if the panel is
+    /// evenly split between confirming and refuting, that *is* the finding's
+    /// status, and pretending otherwise throws away the only thing a panel
+    /// buys over a single judge.
+    pub fn from_panel(finding_id: &str, generation: u32, votes: Vec<JudgeVote>) -> Option<Self> {
+        if votes.is_empty() {
+            return None;
+        }
+        let total: f64 = votes.iter().map(|v| v.weight.max(0.0)).sum();
+        if total <= 0.0 {
+            return None;
+        }
+
+        let weight_for = |verdict: Verdict| -> f64 {
+            votes
+                .iter()
+                .filter(|v| v.raw.verdict == verdict)
+                .map(|v| v.weight.max(0.0))
+                .sum()
+        };
+        let confirmed = weight_for(Verdict::Confirmed);
+        let refuted = weight_for(Verdict::Refuted);
+        let undecided = weight_for(Verdict::Undecided);
+
+        let winner = if confirmed > refuted && confirmed > undecided {
+            Verdict::Confirmed
+        } else if refuted > confirmed && refuted > undecided {
+            Verdict::Refuted
+        } else {
+            Verdict::Undecided
+        };
+        let winning_weight = match winner {
+            Verdict::Confirmed => confirmed,
+            Verdict::Refuted => refuted,
+            Verdict::Undecided => undecided,
+        };
+
+        // Severity and altitude are taken from the judges who actually carried
+        // the verdict; a refuting judge's severity rating is meaningless.
+        let backers: Vec<&JudgeVote> =
+            votes.iter().filter(|v| v.raw.verdict == winner).collect();
+        let backers = if backers.is_empty() { votes.iter().collect() } else { backers };
+
+        let severity = weighted_pick(&backers, |v| severity_index(v.raw.severity), |i| {
+            [Severity::Low, Severity::Medium, Severity::High, Severity::Critical][i]
+        });
+        let altitude = weighted_pick(&backers, |v| altitude_index(v.raw.altitude), |i| {
+            [Altitude::Line, Altitude::Local, Altitude::Module, Altitude::Architectural][i]
+        });
+
+        // Staleness and duplication are factual observations rather than
+        // judgements, so any judge spotting one needs a majority to carry it.
+        let novel_against: f64 =
+            votes.iter().filter(|v| !v.raw.novel).map(|v| v.weight.max(0.0)).sum();
+        let novel = novel_against * 2.0 <= total;
+
+        let duplicate_of = majority_duplicate(&votes, total);
+
+        let reasoning = backers
+            .iter()
+            .map(|v| format!("{}: {}", v.judge, v.raw.reasoning.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let judge_provider = backers
+            .first()
+            .map(|v| v.provider.clone())
+            .unwrap_or_else(|| votes[0].provider.clone());
+
+        Some(Self {
+            raw: RawRuling {
+                finding_id: finding_id.to_string(),
+                verdict: winner,
+                severity,
+                altitude,
+                reasoning,
+                novel,
+                duplicate_of,
+            },
+            judge_provider,
+            generation,
+            dissent: (1.0 - winning_weight / total).clamp(0.0, 1.0),
+            panel: votes,
+        })
+    }
+
+    /// True when every judge reached the same *verdict*. Says nothing about
+    /// whether they agreed on how bad it is — see [`Ruling::severity_spread`].
+    pub fn unanimous(&self) -> bool {
+        self.dissent <= f64::EPSILON
+    }
+
+    /// How far apart the backing judges were on severity, in enum steps.
+    ///
+    /// Observed live: a lenient and a strict judge routinely agree that a
+    /// finding is real and disagree by two steps on what it costs. Verdict
+    /// dissent alone reports that as unanimous, which throws away the thing the
+    /// panel actually measured.
+    pub fn severity_spread(&self) -> usize {
+        self.spread(|v| severity_index(v.raw.severity))
+    }
+
+    /// Same, for altitude. An open judge calling something `architectural`
+    /// where a literal one calls it `module` is the openness axis doing its job.
+    pub fn altitude_spread(&self) -> usize {
+        self.spread(|v| altitude_index(v.raw.altitude))
+    }
+
+    fn spread(&self, index_of: impl Fn(&JudgeVote) -> usize) -> usize {
+        let backing: Vec<usize> = self
+            .panel
+            .iter()
+            .filter(|v| v.raw.verdict == self.raw.verdict)
+            .map(index_of)
+            .collect();
+        match (backing.iter().min(), backing.iter().max()) {
+            (Some(lo), Some(hi)) => hi - lo,
+            _ => 0,
+        }
+    }
+
+    /// Whether the panel disagreed about anything at all — the verdict, how
+    /// serious it is, or how far from a single line it lives.
+    pub fn contested(&self) -> bool {
+        self.panel.len() > 1
+            && (!self.unanimous() || self.severity_spread() > 0 || self.altitude_spread() > 0)
+    }
+
+    /// `2/3` style tally of judges backing the winning verdict.
+    pub fn tally(&self) -> (usize, usize) {
+        let backing =
+            self.panel.iter().filter(|v| v.raw.verdict == self.raw.verdict).count();
+        (backing, self.panel.len())
+    }
+}
+
+fn severity_index(s: Severity) -> usize {
+    match s {
+        Severity::Low => 0,
+        Severity::Medium => 1,
+        Severity::High => 2,
+        Severity::Critical => 3,
+    }
+}
+
+fn altitude_index(a: Altitude) -> usize {
+    match a {
+        Altitude::Line => 0,
+        Altitude::Local => 1,
+        Altitude::Module => 2,
+        Altitude::Architectural => 3,
+    }
+}
+
+/// Weighted mean of an ordinal rating, rounded back to the enum. Mean rather
+/// than majority so a lone `critical` among two `medium`s still pulls upward
+/// instead of being discarded.
+fn weighted_pick<T>(
+    votes: &[&JudgeVote],
+    index_of: impl Fn(&JudgeVote) -> usize,
+    from_index: impl Fn(usize) -> T,
+) -> T {
+    let total: f64 = votes.iter().map(|v| v.weight.max(0.0)).sum();
+    if total <= 0.0 {
+        return from_index(index_of(votes[0]));
+    }
+    let mean: f64 = votes
+        .iter()
+        .map(|v| index_of(v) as f64 * v.weight.max(0.0))
+        .sum::<f64>()
+        / total;
+    from_index((mean.round() as usize).min(3))
+}
+
+/// A duplicate call only carries with a majority of panel weight behind it:
+/// merging two distinct defects hides one of them completely, so a lone judge
+/// is not enough.
+fn majority_duplicate(votes: &[JudgeVote], total: f64) -> Option<String> {
+    let mut tally: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for v in votes {
+        if let Some(target) = v.raw.duplicate_of.as_deref() {
+            *tally.entry(target).or_default() += v.weight.max(0.0);
+        }
+    }
+    tally
+        .into_iter()
+        .filter(|(_, w)| *w * 2.0 > total)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(target, _)| target.to_string())
+}
+
+/// A judge on the panel: a provider, a temperament, and how much its vote counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Judge {
+    pub name: String,
+    #[serde(default)]
+    pub traits: Traits,
+    /// Pinned provider, or `None` to rotate across providers that did not
+    /// author the findings being judged.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default = "unit_weight")]
+    pub weight: f64,
+}
+
+fn unit_weight() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +544,10 @@ pub struct Persona {
     pub focus: String,
     #[serde(default = "default_temp")]
     pub temperature: f32,
+    /// Temperament overlaying the prompt. Neutral by default, in which case it
+    /// contributes nothing.
+    #[serde(default)]
+    pub traits: Traits,
     pub generation: u32,
     #[serde(default)]
     pub parent: Option<String>,
@@ -430,6 +668,210 @@ impl RunOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vote(judge: &str, verdict: Verdict, severity: Severity, weight: f64) -> JudgeVote {
+        JudgeVote {
+            judge: judge.into(),
+            provider: format!("{judge}-provider"),
+            traits: Traits::NEUTRAL,
+            weight,
+            raw: RawRuling {
+                finding_id: "f1".into(),
+                verdict,
+                severity,
+                altitude: Altitude::Local,
+                reasoning: format!("{judge} reasoning"),
+                novel: true,
+                duplicate_of: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_unanimous_panel_has_no_dissent() {
+        let votes = vec![
+            vote("stickler", Verdict::Confirmed, Severity::High, 1.0),
+            vote("pragmatist", Verdict::Confirmed, Severity::High, 1.0),
+            vote("architect", Verdict::Confirmed, Severity::High, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Confirmed);
+        assert!(r.unanimous());
+        assert_eq!(r.tally(), (3, 3));
+    }
+
+    #[test]
+    fn a_finding_only_the_strictest_judge_confirms_is_refuted_but_recorded() {
+        let votes = vec![
+            vote("stickler", Verdict::Confirmed, Severity::Low, 1.0),
+            vote("pragmatist", Verdict::Refuted, Severity::Low, 1.0),
+            vote("architect", Verdict::Refuted, Severity::Low, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Refuted);
+        assert!((r.dissent - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(r.tally(), (2, 3));
+        // The dissenting opinion survives into the report rather than being
+        // collapsed away by the verdict.
+        assert!(r.panel.iter().any(|v| v.judge == "stickler" && v.raw.verdict == Verdict::Confirmed));
+    }
+
+    /// Taken from a live run: `pragmatist` and `architect` both confirmed every
+    /// finding, so verdict dissent was zero — yet one rated a defect `medium`
+    /// and the other `high`, and one called it `module` where the other said
+    /// `architectural`. Reporting that as "unanimous" discards the disagreement
+    /// the panel exists to surface.
+    #[test]
+    fn agreement_on_the_verdict_can_still_hide_disagreement_about_the_cost() {
+        let mut lenient = vote("pragmatist", Verdict::Confirmed, Severity::Low, 1.0);
+        lenient.raw.altitude = Altitude::Module;
+        let mut strict = vote("architect", Verdict::Confirmed, Severity::High, 1.0);
+        strict.raw.altitude = Altitude::Architectural;
+
+        let r = Ruling::from_panel("f1", 0, vec![lenient, strict]).unwrap();
+        assert!(r.unanimous(), "they agree it is real");
+        assert_eq!(r.severity_spread(), 2, "low -> high is two steps");
+        assert_eq!(r.altitude_spread(), 1);
+        assert!(r.contested(), "and that disagreement must not be hidden");
+    }
+
+    #[test]
+    fn full_agreement_is_not_contested() {
+        let votes = vec![
+            vote("a", Verdict::Confirmed, Severity::High, 1.0),
+            vote("b", Verdict::Confirmed, Severity::High, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert!(r.unanimous());
+        assert_eq!(r.severity_spread(), 0);
+        assert_eq!(r.altitude_spread(), 0);
+        assert!(!r.contested());
+    }
+
+    #[test]
+    fn a_dissenters_severity_does_not_count_toward_the_spread() {
+        // The refuter rated it low, but it is not backing the verdict, so its
+        // rating is meaningless and must not widen the apparent disagreement.
+        let votes = vec![
+            vote("a", Verdict::Confirmed, Severity::High, 1.0),
+            vote("b", Verdict::Confirmed, Severity::High, 1.0),
+            vote("c", Verdict::Refuted, Severity::Low, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.severity_spread(), 0);
+        assert!(r.contested(), "but the refusal itself is still a disagreement");
+    }
+
+    #[test]
+    fn a_single_judge_is_never_contested() {
+        let votes = vec![vote("solo", Verdict::Confirmed, Severity::High, 1.0)];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert!(!r.contested(), "one judge cannot disagree with itself");
+        assert_eq!(r.severity_spread(), 0);
+    }
+
+    #[test]
+    fn an_evenly_split_panel_is_undecided_rather_than_arbitrary() {
+        let votes = vec![
+            vote("a", Verdict::Confirmed, Severity::High, 1.0),
+            vote("b", Verdict::Refuted, Severity::High, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Undecided, "a tie must not silently pick a side");
+    }
+
+    #[test]
+    fn a_single_judge_panel_behaves_exactly_as_before() {
+        let votes = vec![vote("solo", Verdict::Confirmed, Severity::Critical, 1.0)];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Confirmed);
+        assert_eq!(r.raw.severity, Severity::Critical);
+        assert_eq!(r.dissent, 0.0);
+        assert!(r.unanimous());
+        assert_eq!(r.judge_provider, "solo-provider");
+    }
+
+    #[test]
+    fn weight_decides_when_the_count_does_not() {
+        let votes = vec![
+            vote("senior", Verdict::Refuted, Severity::High, 3.0),
+            vote("a", Verdict::Confirmed, Severity::High, 1.0),
+            vote("b", Verdict::Confirmed, Severity::High, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Refuted);
+        assert!((r.dissent - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn severity_comes_only_from_the_judges_who_carried_the_verdict() {
+        // The refuting judge rated it low; that must not drag the confirmed
+        // severity down, because a refuter's severity means nothing.
+        let votes = vec![
+            vote("a", Verdict::Confirmed, Severity::Critical, 1.0),
+            vote("b", Verdict::Confirmed, Severity::Critical, 1.0),
+            vote("c", Verdict::Refuted, Severity::Low, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.verdict, Verdict::Confirmed);
+        assert_eq!(r.raw.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn a_lone_high_severity_rating_still_pulls_the_mean_upward() {
+        let votes = vec![
+            vote("a", Verdict::Confirmed, Severity::Critical, 1.0),
+            vote("b", Verdict::Confirmed, Severity::Medium, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        // mean(Medium=1, Critical=3) = 2 -> High
+        assert_eq!(r.raw.severity, Severity::High);
+    }
+
+    #[test]
+    fn merging_two_findings_needs_a_majority_not_one_opinion() {
+        let mut lone = vote("a", Verdict::Confirmed, Severity::High, 1.0);
+        lone.raw.duplicate_of = Some("f9".into());
+        let votes =
+            vec![lone, vote("b", Verdict::Confirmed, Severity::High, 1.0), vote("c", Verdict::Confirmed, Severity::High, 1.0)];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.duplicate_of, None, "one judge must not be able to hide a finding");
+
+        let mut x = vote("a", Verdict::Confirmed, Severity::High, 1.0);
+        let mut y = vote("b", Verdict::Confirmed, Severity::High, 1.0);
+        x.raw.duplicate_of = Some("f9".into());
+        y.raw.duplicate_of = Some("f9".into());
+        let votes = vec![x, y, vote("c", Verdict::Confirmed, Severity::High, 1.0)];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert_eq!(r.raw.duplicate_of.as_deref(), Some("f9"));
+    }
+
+    #[test]
+    fn staleness_also_needs_a_majority() {
+        let mut lone = vote("a", Verdict::Confirmed, Severity::High, 1.0);
+        lone.raw.novel = false;
+        let votes =
+            vec![lone, vote("b", Verdict::Confirmed, Severity::High, 1.0), vote("c", Verdict::Confirmed, Severity::High, 1.0)];
+        assert!(Ruling::from_panel("f1", 0, votes).unwrap().raw.novel);
+    }
+
+    #[test]
+    fn an_empty_or_weightless_panel_yields_no_ruling() {
+        assert!(Ruling::from_panel("f1", 0, vec![]).is_none());
+        let votes = vec![vote("a", Verdict::Confirmed, Severity::High, 0.0)];
+        assert!(Ruling::from_panel("f1", 0, votes).is_none());
+    }
+
+    #[test]
+    fn every_judges_reasoning_that_carried_the_verdict_is_preserved() {
+        let votes = vec![
+            vote("stickler", Verdict::Confirmed, Severity::High, 1.0),
+            vote("architect", Verdict::Confirmed, Severity::High, 1.0),
+        ];
+        let r = Ruling::from_panel("f1", 0, votes).unwrap();
+        assert!(r.raw.reasoning.contains("stickler reasoning"));
+        assert!(r.raw.reasoning.contains("architect reasoning"));
+    }
 
     #[test]
     fn altitude_pressure_inverts_the_ranking_of_nitpicks() {

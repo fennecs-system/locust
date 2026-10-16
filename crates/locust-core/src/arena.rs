@@ -22,7 +22,14 @@ pub enum Event {
     AgentFinished { label: String, produced: usize },
     AgentFailed { label: String, error: String },
     PhaseFinished { generation: u32, phase: &'static str, count: usize },
-    GenerationFinished { generation: u32, confirmed: usize, refuted: usize, top: Vec<Fitness> },
+    GenerationFinished {
+        generation: u32,
+        confirmed: usize,
+        refuted: usize,
+        /// Rulings the panel did not agree on. Zero with a single judge.
+        contested: usize,
+        top: Vec<Fitness>,
+    },
     Breeding { generation: u32 },
     Synthesizing,
     BudgetReached { spent: f64, budget: f64 },
@@ -36,6 +43,7 @@ pub struct Arena {
     vcs: Arc<dyn Vcs>,
     providers: Vec<SharedProvider>,
     judge: SharedProvider,
+    panel: Vec<Judge>,
     meta: SharedProvider,
     synth: SharedProvider,
     store: Store,
@@ -81,11 +89,13 @@ impl Arena {
         let meta = pick(&cfg.evolution.meta_provider.clone().or(cfg.arena.judge.clone()));
         let synth = pick(&cfg.synthesis.provider.clone().or(cfg.arena.judge.clone()));
 
+        let panel = cfg.panel()?;
         let store = Store::create(vcs.root(), &store::new_run_id())?;
         let gate = Arc::new(Semaphore::new(cfg.run.parallelism));
 
         Ok(Self {
             cfg,
+            panel,
             vcs,
             providers,
             judge,
@@ -132,9 +142,9 @@ impl Arena {
         self.store.write_text("config.toml", &toml::to_string_pretty(&self.cfg)?)?;
         self.store.write_text("context.md", &pack.render(true))?;
 
-        let mut attackers = self.cfg.seed_personas(Role::Attacker);
+        let mut attackers = self.cfg.seed_personas(Role::Attacker)?;
         attackers.truncate(self.cfg.arena.attackers.max(1));
-        let mut defenders = self.cfg.seed_personas(Role::Defender);
+        let mut defenders = self.cfg.seed_personas(Role::Defender)?;
         defenders.truncate(self.cfg.arena.defenders.max(1));
 
         let mut generations: Vec<GenerationOutcome> = Vec::new();
@@ -177,6 +187,7 @@ impl Arena {
                     .iter()
                     .filter(|r| r.raw.verdict == Verdict::Refuted)
                     .count(),
+                contested: outcome.rulings.iter().filter(|r| r.contested()).count(),
                 top: outcome.fitness.iter().take(3).cloned().collect(),
             });
 
@@ -209,10 +220,18 @@ impl Arena {
                 {
                     Ok(brood) => {
                         self.add_usage(&brood.usage).await;
-                        attackers =
-                            brood.personas.iter().filter(|p| p.role == Role::Attacker).cloned().collect();
-                        defenders =
-                            brood.personas.iter().filter(|p| p.role == Role::Defender).cloned().collect();
+                        attackers = brood
+                            .personas
+                            .iter()
+                            .filter(|p| p.role == Role::Attacker)
+                            .cloned()
+                            .collect();
+                        defenders = brood
+                            .personas
+                            .iter()
+                            .filter(|p| p.role == Role::Defender)
+                            .cloned()
+                            .collect();
                     }
                     Err(e) => {
                         tracing::warn!("breeding failed, reusing this generation's personas: {e}");
@@ -536,6 +555,11 @@ impl Arena {
         futures::future::join_all(tasks).await.into_iter().flatten().collect()
     }
 
+    /// Rule on each batch with every judge on the panel, then aggregate.
+    ///
+    /// Each judge sees the identical case file and does not know who else is on
+    /// the panel — the point is three independent readings, not a discussion
+    /// that converges on whoever is most assertive.
     async fn judge(
         &self,
         generation: u32,
@@ -544,7 +568,7 @@ impl Arena {
         rebuttals: &[Rebuttal],
         settled: &[SettledFinding],
     ) -> Vec<Ruling> {
-        if canonical.is_empty() {
+        if canonical.is_empty() || self.panel.is_empty() {
             return Vec::new();
         }
         let by_finding: HashMap<&str, Vec<&Rebuttal>> =
@@ -557,77 +581,122 @@ impl Arena {
         let mut tasks = Vec::new();
 
         for (b, batch) in canonical.chunks(batch_size).enumerate() {
-            let provider = self.judge_for(batch, b);
-            let label = format!("gen{generation}-judge-{}-b{b}", crate::config::slug(provider.name()));
-            let pack = pack.clone();
-            let cases: Vec<(Finding, Vec<Rebuttal>)> = batch
-                .iter()
-                .map(|f| {
-                    let rs = by_finding
-                        .get(f.id.as_str())
-                        .map(|v| v.iter().map(|r| (*r).clone()).collect())
-                        .unwrap_or_default();
-                    ((*f).clone(), rs)
-                })
-                .collect();
-            let settled: Vec<SettledFinding> = settled
-                .iter()
-                .map(|s| SettledFinding {
-                    location: s.location.clone(),
-                    title: s.title.clone(),
-                    verdict: s.verdict,
-                })
-                .collect();
-
-            tasks.push(async move {
-                let _permit = self.gate.acquire().await.expect("semaphore is never closed");
-                let borrowed: Vec<(&Finding, Vec<&Rebuttal>)> =
-                    cases.iter().map(|(f, rs)| (f, rs.iter().collect())).collect();
-                let prompt = prompts::judge(&pack, &borrowed, &settled);
-                // Judging is adjudication, not ideation: keep it cold.
-                let out = self.call(&provider, &label, &prompt.system, &prompt.user, 0.1, None).await;
-
-                let report: JudgeReport = match out.and_then(|t| extract_json(&t)) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        (self.report)(Event::AgentFailed {
-                            label: label.clone(),
-                            error: e.to_string(),
-                        });
-                        JudgeReport::default()
-                    }
-                };
-
-                let valid: std::collections::HashSet<&str> =
-                    cases.iter().map(|(f, _)| f.id.as_str()).collect();
-                let mut seen = std::collections::HashSet::new();
-                let rulings: Vec<Ruling> = report
-                    .rulings
-                    .into_iter()
-                    .filter(|r| valid.contains(r.finding_id.as_str()))
-                    // One ruling per finding; a repeated id would double-count
-                    // in the fitness function.
-                    .filter(|r| seen.insert(r.finding_id.clone()))
-                    .map(|raw| Ruling {
-                        raw,
-                        judge_provider: provider.name().to_string(),
-                        generation,
+            for (j, judge) in self.panel.iter().enumerate() {
+                let provider = self.provider_for_judge(judge, batch, b + j);
+                let label = format!(
+                    "gen{generation}-judge-{}-{}-b{b}",
+                    crate::config::slug(&judge.name),
+                    crate::config::slug(provider.name())
+                );
+                let pack = pack.clone();
+                let judge = judge.clone();
+                let cases: Vec<(Finding, Vec<Rebuttal>)> = batch
+                    .iter()
+                    .map(|f| {
+                        let rs = by_finding
+                            .get(f.id.as_str())
+                            .map(|v| v.iter().map(|r| (*r).clone()).collect())
+                            .unwrap_or_default();
+                        ((*f).clone(), rs)
+                    })
+                    .collect();
+                let settled: Vec<SettledFinding> = settled
+                    .iter()
+                    .map(|s| SettledFinding {
+                        location: s.location.clone(),
+                        title: s.title.clone(),
+                        verdict: s.verdict,
                     })
                     .collect();
 
-                (self.report)(Event::AgentFinished { label, produced: rulings.len() });
-                rulings
-            });
+                tasks.push(async move {
+                    let _permit =
+                        self.gate.acquire().await.expect("semaphore is never closed");
+                    let borrowed: Vec<(&Finding, Vec<&Rebuttal>)> =
+                        cases.iter().map(|(f, rs)| (f, rs.iter().collect())).collect();
+                    let prompt = prompts::judge(&pack, &borrowed, &settled, &judge);
+                    // Adjudication is not ideation: cold by default, nudged only
+                    // by the judge's own temperament.
+                    let temperature = judge.traits.temperature(0.1);
+                    let out = self
+                        .call(&provider, &label, &prompt.system, &prompt.user, temperature, None)
+                        .await;
+
+                    let report: JudgeReport = match out.and_then(|t| extract_json(&t)) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            (self.report)(Event::AgentFailed {
+                                label: label.clone(),
+                                error: e.to_string(),
+                            });
+                            JudgeReport::default()
+                        }
+                    };
+
+                    let valid: std::collections::HashSet<&str> =
+                        cases.iter().map(|(f, _)| f.id.as_str()).collect();
+                    let mut seen = std::collections::HashSet::new();
+                    let votes: Vec<JudgeVote> = report
+                        .rulings
+                        .into_iter()
+                        .filter(|r| valid.contains(r.finding_id.as_str()))
+                        // One vote per finding per judge; a repeated id would
+                        // let a single judge outvote the rest of the panel.
+                        .filter(|r| seen.insert(r.finding_id.clone()))
+                        .map(|raw| JudgeVote {
+                            judge: judge.name.clone(),
+                            provider: provider.name().to_string(),
+                            traits: judge.traits,
+                            weight: judge.weight,
+                            raw,
+                        })
+                        .collect();
+
+                    (self.report)(Event::AgentFinished { label, produced: votes.len() });
+                    votes
+                });
+            }
         }
 
-        futures::future::join_all(tasks).await.into_iter().flatten().collect()
+        let votes: Vec<JudgeVote> =
+            futures::future::join_all(tasks).await.into_iter().flatten().collect();
+
+        // Group by finding, preserving the order the findings came in so the
+        // report is stable across runs.
+        let mut grouped: HashMap<&str, Vec<JudgeVote>> = HashMap::new();
+        for v in &votes {
+            grouped.entry(v.raw.finding_id.as_str()).or_default().push(v.clone());
+        }
+
+        let mut rulings = Vec::new();
+        for f in canonical {
+            let Some(votes) = grouped.remove(f.id.as_str()) else { continue };
+            if let Some(ruling) = Ruling::from_panel(&f.id, generation, votes) {
+                rulings.push(ruling);
+            }
+        }
+        rulings
     }
 
-    /// Pick the judge for a batch. When no judge is pinned in config, prefer a
-    /// provider that did not author anything in the batch: models reliably
-    /// prefer their own output, and a judge ruling on its own findings quietly
-    /// turns the whole tournament into a popularity contest between vendors.
-    fn judge_for(&self, batch: &[&Finding], rotation: usize) -> SharedProvider {
+    /// Which provider carries this judge's vote.
+    ///
+    /// A pinned provider wins. Otherwise the judge rotates across providers
+    /// that authored none of the findings in the batch — models prefer their
+    /// own output, and a judge ruling on its own agents' findings turns the
+    /// tournament into a popularity contest between vendors. The rotation is
+    /// offset per judge, so a three-judge panel over three providers gets
+    /// temperament diversity and model diversity from one configuration.
+    fn provider_for_judge(
+        &self,
+        judge: &Judge,
+        batch: &[&Finding],
+        rotation: usize,
+    ) -> SharedProvider {
+        if let Some(name) = &judge.provider {
+            if let Some(p) = self.providers.iter().find(|p| p.name() == name) {
+                return p.clone();
+            }
+        }
         if self.cfg.arena.judge.is_some() || !self.cfg.arena.judge_excludes_author {
             return self.judge.clone();
         }
@@ -636,7 +705,7 @@ impl Arena {
         let neutral: Vec<&SharedProvider> =
             self.providers.iter().filter(|p| !authors.contains(p.name())).collect();
         match neutral.len() {
-            0 => self.judge.clone(),
+            0 => self.providers[rotation % self.providers.len()].clone(),
             n => neutral[rotation % n].clone(),
         }
     }

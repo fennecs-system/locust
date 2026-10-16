@@ -87,9 +87,14 @@ pub fn reporter(verbose: bool) -> Reporter {
             };
             eprintln!("  {:<8} {count} {}", cyan(phase), dim(noun));
         }
-        Event::GenerationFinished { confirmed, refuted, top, .. } => {
+        Event::GenerationFinished { confirmed, refuted, contested, top, .. } => {
+            let split = if contested > 0 {
+                format!(", {} the panel split on", bold(&contested.to_string()))
+            } else {
+                String::new()
+            };
             eprintln!(
-                "  {:<8} {} confirmed, {} refuted",
+                "  {:<8} {} confirmed, {} refuted{split}",
                 cyan("verdict"),
                 bold(&confirmed.to_string()),
                 refuted

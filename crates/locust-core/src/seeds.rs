@@ -6,13 +6,19 @@
 //! a defender and a judge, so these only need to be *different* from each other
 //! and specific enough to produce falsifiable claims.
 
-use crate::model::{Origin, Persona, Role};
+use crate::model::{Judge, Origin, Persona, Role};
+use crate::traits::Traits;
 
 struct Seed {
     name: &'static str,
     focus: &'static str,
     temperature: f32,
     prompt: &'static str,
+    /// Temperament overlaying the prompt. The built-in library stays neutral:
+    /// these prompts were written to stand on their own, and a trait paragraph
+    /// bolted on would compete with them rather than sharpen them. Traits are
+    /// for personas you declare yourself, and for the judging panel.
+    traits: Traits,
 }
 
 const ATTACKERS: &[Seed] = &[
@@ -33,6 +39,7 @@ of two writes?
 You are not interested in code that is merely single-threaded and ugly. A \
 finding of yours must name a specific interleaving or failure point and the \
 observable wrong outcome it produces.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "contract breaker",
@@ -51,6 +58,7 @@ existing caller?
 
 Cite the specific caller you believe now breaks. A contract claim with no \
 named victim is not a finding.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "error path auditor",
@@ -68,6 +76,7 @@ tell which of the four callers caused it?
 
 Prefer the failure that leaves the system in a wrong state over the one that \
 merely crashes loudly.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "data shape skeptic",
@@ -84,6 +93,7 @@ timestamp unambiguous about its zone, a string bounded? Is user input validated 
 before it reaches the place that trusts it?
 
 Give the exact input that breaks it.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "systems architect",
@@ -104,6 +114,7 @@ Read beyond the diff. Your findings should be the ones that are cheap now and \
 expensive in six months. State the structural claim plainly, name the specific \
 future change it makes hard, and point at the code that proves the pattern \
 already exists.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "security adversary",
@@ -122,6 +133,7 @@ control? Is a comparison on a secret timing-safe?
 
 Describe the attack as a sequence of requests. Theoretical risk with no \
 reachable path is not a finding.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "performance realist",
@@ -139,6 +151,7 @@ alive longer than it needs to?
 
 Estimate the real n from the code and say what the cost becomes at that n. A \
 hot-path claim needs evidence that the path is hot.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "test archaeologist",
@@ -155,6 +168,7 @@ code no longer makes? Is there a test that passes for the wrong reason?
 
 Name the mutation to the source that would survive the suite. That mutation is \
 your evidence.",
+        traits: Traits::NEUTRAL,
     },
 ];
 
@@ -178,6 +192,7 @@ trust your other rebuttals less, and a finding you wrongly concede ships a \
 pointless change. If a finding is real, say `concede` and say so plainly. If \
 it is real but smaller than claimed, say `narrow` and state the actual blast \
 radius.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "context keeper",
@@ -194,6 +209,7 @@ attacker's suggestion something this codebase has consciously chosen not to do?
 
 Your strongest move is a citation from outside the diff. Your weakest is an \
 appeal to intent you cannot evidence — do not make it.",
+        traits: Traits::NEUTRAL,
     },
     Seed {
         name: "cost of change",
@@ -212,11 +228,13 @@ these are refutations even though the literal claim holds.
 Be honest about the opposite case too: if a finding is cheap to fix and \
 expensive to miss, concede it immediately and say so. You are calibrating \
 severity, not blocking all work.",
+        traits: Traits::NEUTRAL,
     },
 ];
 
 fn build(seed: &Seed, role: Role) -> Persona {
     Persona {
+        traits: seed.traits,
         id: format!("{}-{}", role.short(), crate::config::slug(seed.name)),
         name: seed.name.to_string(),
         role,
@@ -227,6 +245,27 @@ fn build(seed: &Seed, role: Role) -> Persona {
         parent: None,
         origin: Origin::Seed,
     }
+}
+
+/// The default judging panel: three temperaments that disagree for different
+/// reasons.
+///
+/// `stickler` demands the evidence be quoted and assumes the reviewer is wrong;
+/// `pragmatist` asks whether anyone will actually be hurt and deflates
+/// hypotheticals; `architect` will confirm a structural claim on the strength
+/// of the argument alone. A finding all three confirm has cleared three
+/// genuinely different bars. A finding only one confirms tells you which bar it
+/// cleared, which is more useful than a bare verdict.
+pub fn default_panel() -> Vec<Judge> {
+    ["stickler", "pragmatist", "architect"]
+        .into_iter()
+        .map(|name| Judge {
+            name: name.to_string(),
+            traits: Traits::preset(name).expect("built-in preset"),
+            provider: None,
+            weight: 1.0,
+        })
+        .collect()
 }
 
 pub fn library(role: Role) -> Vec<Persona> {
