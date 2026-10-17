@@ -125,6 +125,28 @@ async fn main() {
         .without_time()
         .init();
 
+    // Agents run in their own process groups so a timeout can take their
+    // subprocesses with them; the cost is that Ctrl-C no longer reaches them.
+    // Without this an interrupted run leaves every in-flight agent running.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let interrupted = tokio::select! {
+            _ = tokio::signal::ctrl_c() => true,
+            _ = term.recv() => true,
+        };
+        if interrupted {
+            eprintln!("\n{} stopping agents", term::yellow("interrupted"));
+            locust_provider::cli::kill_active_agents();
+            // 128 + SIGINT, the conventional shell encoding.
+            std::process::exit(130);
+        }
+    });
+
     if let Err(e) = run(cli).await {
         eprintln!("\n{} {e:#}", term::red("error:"));
         std::process::exit(1);

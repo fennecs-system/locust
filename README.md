@@ -211,7 +211,21 @@ shape covers `systemd-run --scope -p MemoryMax=2G --`, `nix develop ... -c`,
 takes a command as its tail. Only CLI providers spawn processes, so only they
 are affected; a provider can opt out with `sandbox = false`.
 
-Two things worth knowing. Prompt text is **never** interpolated into the
+A caveat the arena found reviewing itself: **killing the wrapper does not
+always kill what it started.** A timeout signals the process group locust
+spawned, which is the `docker` client — not the container, which the daemon
+owns. Use `--rm` plus a container-side limit so a runaway agent is bounded by
+something other than locust:
+
+```toml
+command = ["docker", "run", "--rm", "--init", "--stop-timeout", "10",
+           "--network=none", "-v", "{workspace}:/w", "-w", "/w", "locust-agent"]
+```
+
+`systemd-run --scope`, `bwrap` and `nix develop -c` do not have this problem:
+they stay in the process group and die with it.
+
+Two more things worth knowing. Prompt text is **never** interpolated into the
 wrapper argv — only `{workspace}`, `{id}` and `{model}` are, so a model cannot
 inject arguments into your container invocation. And an agent still needs the
 credentials its CLI authenticates with, so a sandbox that blocks the network

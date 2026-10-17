@@ -81,7 +81,8 @@ fn check(text: &str, finding: &Finding) -> Grounding {
     let by_line: Vec<String> = lines.iter().map(|l| squash(l)).collect();
     let quoted: Vec<String> = evidence
         .lines()
-        .map(squash)
+        .flat_map(unprefixed)
+        .map(|l| squash(&l))
         .filter(|l| l.len() >= MIN_EVIDENCE_LINE)
         // Fences and ellipses are formatting the model added, not claims.
         .filter(|l| !l.starts_with("```") && !l.starts_with("..."))
@@ -131,6 +132,24 @@ fn shares_a_run(needle: &str, hay: &str) -> bool {
 
 fn strip_ws(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// A quoted line, plus the same line with a unified-diff marker removed.
+///
+/// Reviewers are handed a diff and quote straight out of it, so their evidence
+/// arrives as `+    let x = 1;` while the file contains `    let x = 1;`.
+/// Matching only the literal text reports genuine quotes as invented. Both
+/// forms are kept, because a leading `-` is also valid code.
+fn unprefixed(line: &str) -> Vec<String> {
+    let trimmed = line.trim_start();
+    let mut out = vec![line.to_string()];
+    if let Some(rest) = trimmed.strip_prefix(['+', '-', '>']) {
+        // Not a diff hunk header, which is prose about the file, not from it.
+        if !trimmed.starts_with("---") && !trimmed.starts_with("+++") {
+            out.push(rest.to_string());
+        }
+    }
+    out
 }
 
 fn normalize(path: &str) -> String {
@@ -258,6 +277,29 @@ mod tests {
             Some(1),
             "self.registry.lookup(&key).and_then(|entry| entry.resolve(path)).unwrap_or_default()",
         );
+        assert!(matches!(check(src, &f), Grounding::EvidenceNotFound { .. }));
+    }
+
+    /// Raised by two reviewers in the two-provider run, independently: they
+    /// are given a unified diff and quote out of it, so their evidence carries
+    /// `+` and `-` markers the file does not have.
+    #[test]
+    fn evidence_quoted_straight_out_of_the_diff_is_not_called_invented() {
+        let src = "fn take(n: usize) -> usize {\n    let scaled = n * 2;\n    scaled\n}\n";
+
+        for quoted in [
+            "+    let scaled = n * 2;",
+            "-    let scaled = n * 2;",
+            "> let scaled = n * 2;",
+            "```diff\n+    let scaled = n * 2;\n```",
+        ] {
+            let f = finding("a.rs", Some(2), quoted);
+            assert_eq!(check(src, &f), Grounding::Verified, "rejected: {quoted:?}");
+        }
+
+        // The marker is not a licence to match anything: invented code with a
+        // `+` in front is still invented.
+        let f = finding("a.rs", Some(2), "+    self.registry.insert(key, value.clone());");
         assert!(matches!(check(src, &f), Grounding::EvidenceNotFound { .. }));
     }
 

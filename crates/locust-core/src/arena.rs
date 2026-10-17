@@ -46,12 +46,32 @@ pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
 /// with nothing to show) or simply the end of the run (a later one, with
 /// earlier generations worth reporting).
 #[derive(Debug, thiserror::Error)]
-#[error("every reviewer failed in generation {} ({launched}/{launched}); no review was performed. \
-         See .locust/runs/{run_id}/transcripts/ for the provider errors", generation + 1)]
+#[error("every {phase} failed in generation {} ({launched}/{launched}); no {produced} was \
+         performed. See .locust/runs/{run_id}/transcripts/ for the provider errors",
+        generation + 1)]
 struct GenerationAborted {
     generation: u32,
+    /// What failed, as a noun: `reviewer`, `judge`.
+    phase: &'static str,
+    /// What therefore did not happen: `review`, `judging`.
+    produced: &'static str,
     launched: usize,
     run_id: String,
+}
+
+/// How many judge calls were made and how many failed. Nothing being
+/// confirmed and nothing being judged look identical in the output, so the
+/// counts have to leave the phase.
+#[derive(Default)]
+struct JudgeCalls(std::cell::Cell<(usize, usize)>);
+
+impl JudgeCalls {
+    fn set(&self, calls: usize, failed: usize) {
+        self.0.set((calls, failed));
+    }
+    fn get(&self) -> (usize, usize) {
+        self.0.get()
+    }
 }
 
 struct Attacked {
@@ -71,6 +91,11 @@ pub struct Arena {
     store: Store,
     gate: Arc<Semaphore>,
     usage: Arc<Mutex<Usage>>,
+    /// Every warning raised, kept so the durable record carries the
+    /// qualifications the run itself made. A verdict whose panel lost a judge
+    /// is not the same verdict, and a reader of `report.md` three weeks later
+    /// has no other way to learn that.
+    warnings: Arc<Mutex<Vec<String>>>,
     report: Reporter,
 }
 
@@ -127,6 +152,7 @@ impl Arena {
             store,
             gate,
             usage: Arc::new(Mutex::new(Usage::default())),
+            warnings: Arc::new(Mutex::new(Vec::new())),
             report,
         })
     }
@@ -163,7 +189,7 @@ impl Arena {
         });
 
         for message in self.validity_warnings() {
-            (self.report)(Event::Warning { message });
+            self.warn(message).await;
         }
 
         self.store.write_text("config.toml", &toml::to_string_pretty(&self.cfg)?)?;
@@ -199,9 +225,7 @@ impl Arena {
                     Ok(aborted) if generations.is_empty() => return Err(aborted.into()),
                     // Earlier generations stand; stop here and report them.
                     Ok(aborted) => {
-                        (self.report)(Event::Warning {
-                            message: format!("{aborted}; reporting the {} generation(s) that completed", generations.len()),
-                        });
+                        self.warn(format!("{aborted}; reporting the {} generation(s) that completed", generations.len())).await;
                         break;
                     }
                     Err(other) => return Err(other),
@@ -231,15 +255,13 @@ impl Arena {
             // rubber-stamping -- and every fitness score that generation is
             // measuring the attackers' volume rather than their accuracy.
             if refuted == 0 && confirmed >= 4 {
-                (self.report)(Event::Warning {
-                    message: format!(
+                self.warn(format!(
                         "the panel refuted none of {confirmed} findings in generation {}. \
                          Either the change is genuinely this bad, or judging is not \
                          discriminating -- check a refutation you disagree with in the \
                          transcripts before trusting this generation's scores",
                         generation + 1
-                    ),
-                });
+                    )).await;
             }
 
             (self.report)(Event::GenerationFinished {
@@ -313,6 +335,7 @@ impl Arena {
             vcs: self.vcs.kind().to_string(),
             generations,
             themes: Vec::new(),
+            warnings: Vec::new(),
             usage: self.usage.lock().await.clone(),
             elapsed_secs: started.elapsed().as_secs_f64(),
         };
@@ -326,6 +349,7 @@ impl Arena {
         }
 
         outcome.usage = self.usage.lock().await.clone();
+        outcome.warnings = self.warnings.lock().await.clone();
         outcome.elapsed_secs = started.elapsed().as_secs_f64();
 
         self.store.write_json("report.json", &outcome)?;
@@ -409,19 +433,19 @@ impl Arena {
             // loses the whole run for the sake of its last step.
             return Err(GenerationAborted {
                 generation,
+                phase: "reviewer",
+                produced: "review",
                 launched,
                 run_id: self.store.run_id.clone(),
             }
             .into());
         }
         if failed * 2 >= launched && failed > 0 {
-            (self.report)(Event::Warning {
-                message: format!(
+            self.warn(format!(
                     "{failed} of {launched} reviewers failed in generation {}; the population \
                      was smaller than configured and the fitness scores reflect that",
                     generation + 1
-                ),
-            });
+                )).await;
         }
         // Check every citation against the real file before anyone argues
         // about it, so the defender and the judge can both see when a reviewer
@@ -436,13 +460,11 @@ impl Arena {
 
         let ungrounded = findings.iter().filter(|f| !f.grounding.is_sound()).count();
         if ungrounded > 0 {
-            (self.report)(Event::Warning {
-                message: format!(
+            self.warn(format!(
                     "{ungrounded} of {} findings cite code that could not be located in the \
                      target revision; they are marked for the defenders and the panel",
                     findings.len()
-                ),
-            });
+                )).await;
         }
         (self.report)(Event::PhaseFinished { generation, phase: "attack", count: findings.len() });
 
@@ -457,10 +479,26 @@ impl Arena {
             rebuttals
         };
 
+        let judge_calls = JudgeCalls::default();
         let mut rulings = {
             let canonical: Vec<&Finding> = findings.iter().filter(|f| f.is_canonical()).collect();
-            self.judge(generation, pack, &canonical, &rebuttals, settled).await
+            self.judge(generation, pack, &canonical, &rebuttals, settled, &judge_calls).await
         };
+
+        // Nothing judged is not the same as nothing confirmed, but the report
+        // and `--fail-on` cannot tell them apart: both show no confirmed
+        // findings and exit 0. This is the third phase to need the same guard.
+        let (calls, failed) = judge_calls.get();
+        if calls > 0 && failed == calls {
+            return Err(GenerationAborted {
+                generation,
+                phase: "judge",
+                produced: "judging",
+                launched: calls,
+                run_id: self.store.run_id.clone(),
+            }
+            .into());
+        }
 
         // The judge read every case in a batch side by side and may have spotted
         // repeats that token overlap could not. Fold those in, then drop the
@@ -723,6 +761,7 @@ impl Arena {
         canonical: &[&Finding],
         rebuttals: &[Rebuttal],
         settled: &[SettledFinding],
+        judge_calls: &JudgeCalls,
     ) -> Vec<Ruling> {
         if canonical.is_empty() || self.panel.is_empty() {
             return Vec::new();
@@ -739,8 +778,11 @@ impl Arena {
         for (b, batch) in canonical.chunks(batch_size).enumerate() {
             for (j, judge) in self.panel.iter().enumerate() {
                 let provider = self.provider_for_judge(judge, batch, b + j);
+                // `j` disambiguates judges whose names slug to the same thing
+                // ("fast reviewer" and "fast-reviewer"), which would otherwise
+                // overwrite each other's transcripts.
                 let label = format!(
-                    "gen{generation}-judge-{}-{}-b{b}",
+                    "gen{generation}-judge{j}-{}-{}-b{b}",
                     crate::config::slug(&judge.name),
                     crate::config::slug(provider.name())
                 );
@@ -823,20 +865,19 @@ impl Arena {
         let failed = results.iter().filter(|(_, ok)| !ok).count();
         let votes: Vec<JudgeVote> =
             results.into_iter().flat_map(|(v, _)| v).collect();
+        judge_calls.set(calls, failed);
 
         // A judge that errored is absent, not agreeing. Left unsaid, a panel of
         // three that lost one reports its verdict as unanimous 2/2 and the
         // dissent figure -- the whole reason to run a panel -- quietly becomes
         // a measurement of a smaller panel than was configured.
         if failed > 0 {
-            (self.report)(Event::Warning {
-                message: format!(
+            self.warn(format!(
                     "{failed} of {calls} judge calls failed in generation {}; affected findings \
                      were ruled by a smaller panel than configured, so their agreement figures \
                      are over the judges that answered",
                     generation + 1
-                ),
-            });
+                )).await;
         }
 
         // Group by finding, preserving the order the findings came in so the
@@ -955,6 +996,12 @@ impl Arena {
                 Err(e)
             }
         }
+    }
+
+    /// Raise a warning: recorded for the report, then shown live.
+    async fn warn(&self, message: String) {
+        self.warnings.lock().await.push(message.clone());
+        (self.report)(Event::Warning { message });
     }
 
     async fn add_usage(&self, u: &Usage) {

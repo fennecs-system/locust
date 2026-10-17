@@ -960,6 +960,86 @@ async fn excluded_files_are_absent_from_the_diff_itself() -> Result<()> {
     Ok(())
 }
 
+/// Raised by the two-provider review, and the third phase to need this guard:
+/// when every judge call failed, `judge()` returned no rulings, the report said
+/// "No confirmed findings" and `--fail-on` passed. Nothing judged is not the
+/// same as nothing confirmed.
+#[tokio::test]
+async fn a_generation_where_every_judge_failed_is_an_error() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 2, &["alpha"]);
+
+    /// Reviewers and defenders work; only judging is dead.
+    struct JudgingIsDown(Scripted);
+
+    #[async_trait]
+    impl Provider for JudgingIsDown {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn model(&self) -> &str {
+            "scripted"
+        }
+        async fn complete(&self, req: Request) -> Result<Response> {
+            if req.system.contains("adjudicating a code review") {
+                bail!("judging is unavailable");
+            }
+            self.0.complete(req).await
+        }
+    }
+
+    let provider: locust_provider::SharedProvider = Arc::new(JudgingIsDown(Scripted::new(
+        "alpha",
+        vec![("src/pool.rs", 2, "a defect worth judging", "local")],
+    )));
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
+    let err = arena.run().await.unwrap_err().to_string();
+    assert!(err.contains("every judge failed"), "got: {err}");
+    assert!(err.contains("no judging was performed"), "got: {err}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+/// Raised by the same review: every caveat the run raised existed only as a
+/// transient string on the reporter callback, so the durable record showed
+/// verdicts without the qualifications the run itself had made.
+#[tokio::test]
+async fn caveats_reach_the_durable_record_not_just_the_terminal() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 2, &["alpha"]);
+
+    let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
+        "alpha",
+        vec![("src/pool.rs", 99999, "cites a line that is not there", "local")],
+    ));
+
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
+    let outcome = arena.run().await?;
+
+    assert!(!outcome.warnings.is_empty(), "warnings must survive into the outcome");
+    assert!(
+        outcome.warnings.iter().any(|w| w.contains("every agent and every judge")),
+        "the single-provider caveat is part of the record: {:?}",
+        outcome.warnings
+    );
+
+    // And they survive a round trip through the stored JSON, which is what
+    // `--json` and `report --render` read.
+    let json = serde_json::to_string(&outcome)?;
+    let back: locust_core::RunOutcome = serde_json::from_str(&json)?;
+    assert_eq!(back.warnings, outcome.warnings);
+
+    let md = locust_core::report::markdown(&outcome, &cfg);
+    assert!(md.contains("Caveats from this run"), "and are rendered before the findings");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_empty_diff_is_an_error_not_an_empty_review() -> Result<()> {
     let repo = fixture_repo()?;

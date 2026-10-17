@@ -245,7 +245,13 @@ fn render(found: &Detected) -> String {
          # {model} are -- so a model cannot inject arguments into your container command.\n\
          #\n\
          # An agent still needs whatever credentials its CLI authenticates with, so a\n\
-         # sandbox that blocks the network blocks the agent: allow the API host only.\n\n",
+         # sandbox that blocks the network blocks the agent: allow the API host only.\n\
+         #\n\
+         # Killing the wrapper does not always kill what it started. A timeout signals the\n\
+         # process group locust spawned -- for docker that is the client, not the container,\n\
+         # which the daemon owns. Add `--rm --init --stop-timeout 10` so a runaway agent is\n\
+         # bounded by something other than locust. systemd-run, bwrap and nix develop stay\n\
+         # in the process group and die with it.\n\n",
     );
 
     s.push_str(

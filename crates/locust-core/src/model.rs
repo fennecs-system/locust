@@ -715,6 +715,12 @@ pub struct RunOutcome {
     pub vcs: String,
     pub generations: Vec<GenerationOutcome>,
     pub themes: Vec<Theme>,
+    /// Everything the run raised that qualifies its own verdicts: a panel that
+    /// lost a judge, a generation nothing was refuted in, citations that did
+    /// not resolve. Kept here so `report.md`, `report.json` and `--json` carry
+    /// them, rather than them scrolling past on stderr and being lost.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub usage: locust_provider::Usage,
     pub elapsed_secs: f64,
 }

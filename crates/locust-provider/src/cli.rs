@@ -9,6 +9,7 @@ use crate::{extract_json, Provider, ProviderSettings, Request, Response, Usage};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -140,39 +141,56 @@ impl Provider for CliProvider {
             .spawn()
             .with_context(|| format!("spawning `{program}` for provider `{}`", self.settings.name))?;
 
-        if let Some(template) = &self.spec.stdin {
-            let payload = self.render(template, &req);
-            let mut stdin = child.stdin.take().context("stdin was not piped")?;
-            stdin.write_all(payload.as_bytes()).await?;
-            stdin.shutdown().await?;
-        } else {
-            drop(child.stdin.take());
+        // Readers first, before anything is written. A child that starts
+        // talking immediately fills its pipe buffer and blocks, and if locust
+        // is still writing stdin at that moment neither side can move --
+        // which is the deadlock draining concurrently was meant to prevent.
+        #[cfg(unix)]
+        let group = child.id().map(|p| p as i32);
+        #[cfg(unix)]
+        if let Some(pid) = group {
+            register_group(pid);
         }
 
-        // Drain both pipes concurrently with waiting. A child that fills a
-        // pipe buffer blocks on write forever if nothing is reading, so
-        // waiting first and reading afterwards can hang until the timeout on
-        // output that was already there.
-        let mut stdout_pipe = child.stdout.take().context("stdout was not piped")?;
-        let mut stderr_pipe = child.stderr.take().context("stderr was not piped")?;
-        let out_reader = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let _ = stdout_pipe.read_to_end(&mut buf).await;
-            buf
-        });
-        let err_reader = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let _ = stderr_pipe.read_to_end(&mut buf).await;
-            buf
-        });
+        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+        let stdout_pipe = child.stdout.take().context("stdout was not piped")?;
+        let stderr_pipe = child.stderr.take().context("stderr was not piped")?;
+        let out_reader = tokio::spawn(drain(stdout_pipe, stdout_buf.clone()));
+        let err_reader = tokio::spawn(drain(stderr_pipe, stderr_buf.clone()));
+
+        // Writing stdin is also a task: a child that never reads it would
+        // otherwise block this function outside the timeout entirely, so
+        // `timeout_secs` would not apply to the one case most likely to hang.
+        let stdin_writer = match &self.spec.stdin {
+            Some(template) => {
+                let payload = self.render(template, &req);
+                let mut stdin = child.stdin.take().context("stdin was not piped")?;
+                Some(tokio::spawn(async move {
+                    stdin.write_all(payload.as_bytes()).await?;
+                    stdin.shutdown().await
+                }))
+            }
+            None => {
+                drop(child.stdin.take());
+                None
+            }
+        };
 
         let timeout = std::time::Duration::from_secs(self.settings.timeout_secs);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(status) => status.context("waiting for CLI provider")?,
             Err(_) => {
+                #[cfg(unix)]
+                if let Some(pid) = group {
+                    forget_group(pid);
+                }
                 terminate(&mut child).await;
                 out_reader.abort();
                 err_reader.abort();
+                if let Some(w) = stdin_writer {
+                    w.abort();
+                }
                 bail!(
                     "provider `{}` exceeded timeout of {}s on `{}` (process group terminated)",
                     self.settings.name,
@@ -182,10 +200,44 @@ impl Provider for CliProvider {
             }
         };
 
+        // The child is gone, but a descendant it spawned may still hold the
+        // write end of either pipe, in which case these reads never finish.
+        // Wait only briefly, then take whatever arrived: losing the tail of a
+        // transcript is a far better outcome than an agent that never returns.
+        const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+        if tokio::time::timeout(DRAIN_GRACE, async {
+            let _ = out_reader.await;
+            let _ = err_reader.await;
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                provider = %self.settings.name,
+                "a descendant still holds an output pipe; using the output received so far"
+            );
+        }
+        if let Some(w) = stdin_writer {
+            // Its failure is only interesting if the child also failed, and
+            // the exit status already says that.
+            if let Ok(Err(e)) = w.await {
+                tracing::debug!(provider = %self.settings.name, "writing stdin failed: {e}");
+            }
+        }
+
+        let take = |buf: &Arc<Mutex<Vec<u8>>>| {
+            std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()))
+        };
+
+        #[cfg(unix)]
+        if let Some(pid) = group {
+            forget_group(pid);
+        }
+
         let out = std::process::Output {
             status,
-            stdout: out_reader.await.unwrap_or_default(),
-            stderr: err_reader.await.unwrap_or_default(),
+            stdout: take(&stdout_buf),
+            stderr: take(&stderr_buf),
         };
 
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -276,6 +328,58 @@ impl Provider for CliProvider {
             provider: self.settings.name.clone(),
             model: self.settings.model.clone(),
         })
+    }
+}
+
+/// Process groups of agents currently running.
+///
+/// Giving each agent its own group is what lets a timeout take its
+/// subprocesses with it -- but it also means a Ctrl-C at the terminal no
+/// longer reaches them, because the signal goes to locust's group alone.
+/// Without this registry an interrupted run leaves every in-flight agent
+/// running, holding a worktree and spending quota, with nothing left to reap
+/// them.
+#[cfg(unix)]
+static ACTIVE_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn register_group(pid: i32) {
+    ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+}
+
+#[cfg(unix)]
+fn forget_group(pid: i32) {
+    ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
+}
+
+/// Signal every agent still running. Call this when the process is going away
+/// for a reason the normal paths will not handle -- an interrupt, say.
+pub fn kill_active_agents() {
+    #[cfg(unix)]
+    {
+        let groups = std::mem::take(&mut *ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()));
+        for pid in groups {
+            // SAFETY: each pid is that of a child this process spawned into
+            // its own group, so the negation signals that group alone.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Read a pipe into a shared buffer as it arrives, so whatever was received
+/// stays available even when the read never finishes.
+async fn drain<R>(mut pipe: R, into: Arc<Mutex<Vec<u8>>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => into.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+        }
     }
 }
 
@@ -474,6 +578,18 @@ mod tests {
 
     use crate::ProviderSettings;
 
+    /// `kill_active_agents` is deliberately global -- an interrupt stops every
+    /// agent, not a chosen one -- so any test that calls it would otherwise
+    /// kill the children of tests running beside it. Tests that spawn real
+    /// processes take this first.
+    /// Async-aware, because each of these tests holds it across an await
+    /// while its child runs.
+    static SPAWNS_PROCESSES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+        SPAWNS_PROCESSES.lock().await
+    }
+
     fn spec(command: &[&str]) -> CliSpec {
         CliSpec {
             command: command.iter().map(|s| s.to_string()).collect(),
@@ -496,6 +612,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_timeout_kills_the_child_and_everything_it_spawned() {
+        let _guard = exclusive().await;
         let marker = std::env::temp_dir().join(format!("locust-reap-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
 
@@ -522,6 +639,33 @@ mod tests {
             !marker.exists(),
             "grandchild outlived the timeout: only the direct child was signalled"
         );
+    }
+
+    /// With agents in their own process groups, an interrupt at the terminal
+    /// reaches locust and nothing else. `kill_active_agents` is what closes
+    /// that gap, so it has to actually reach a grandchild.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupting_the_run_stops_agents_and_their_children() {
+        let _guard = exclusive().await;
+        let marker = std::env::temp_dir().join(format!("locust-int-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let script = format!("( sleep 4; touch {} ) & sleep 30", marker.display());
+        let provider =
+            CliProvider::new(settings(60), spec(&["sh", "-c", &script])).unwrap();
+
+        let agent = tokio::spawn(async move {
+            let _ = provider.complete(Request::new("t", "s", "p")).await;
+        });
+
+        // Let it get going, then do what the signal handler does.
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        kill_active_agents();
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(!marker.exists(), "a grandchild survived the interrupt");
+        agent.abort();
     }
 
     /// Output already written must not be lost, and a child that writes more
@@ -674,25 +818,30 @@ mod tests {
 
     /// Raised by codex reviewing the adapter written for it: joining every
     /// agent message let a progress note ahead of the report be parsed as the
-    /// report. Only the final message is the answer.
-    #[test]
-    fn only_the_final_agent_message_is_the_reply() {
+    /// report. Only the final message is the reply.
+    ///
+    /// Driven through `complete` rather than reimplementing the extraction:
+    /// the first version of this test built its own `.last()` pipeline, so
+    /// changing production to `.next()` would have left it passing.
+    #[tokio::test]
+    async fn only_the_final_agent_message_is_the_reply() {
         let stream = concat!(
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"scanning\"}"}}"#,
             "\n",
-            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[1]}"}}"#,
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"deciding what to report"}}"#,
             "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[1]}"}}"#,
         );
-        let Extract::JsonLinesWhere { path, key, equals } = &codex_spec().extract else {
-            panic!("codex must filter the transcript");
-        };
-        let text = jsonl(stream)
-            .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))
-            .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
-            .last()
-            .unwrap_or_default();
-        assert_eq!(text, r#"{"findings":[1]}"#);
-        assert!(!text.contains("scanning"), "a progress note was spliced in ahead of the report");
+        let mut spec = codex_spec();
+        spec.command = vec!["sh".into(), "-c".into(), format!("cat <<'EOF'\n{stream}\nEOF")];
+        spec.stdin = None;
+
+        let provider = CliProvider::new(settings(30), spec).unwrap();
+        let resp = provider.complete(Request::new("t", "s", "p")).await.unwrap();
+
+        assert_eq!(resp.text, r#"{"findings":[1]}"#);
+        assert!(!resp.text.contains("scanning"), "a progress note was read as the report");
+        assert!(!resp.text.contains("deciding"), "reasoning leaked into the reply");
     }
 
     /// Raised by claude reviewing the same adapter: a turn that fails after

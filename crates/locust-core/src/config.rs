@@ -741,8 +741,12 @@ impl Config {
             if !judge_names.insert(&j.name) {
                 bail!("duplicate judge name `{}`", j.name);
             }
-            if j.weight < 0.0 {
-                bail!("judge `{}`: weight must not be negative", j.name);
+            if !j.weight.is_finite() || j.weight < 0.0 {
+                bail!(
+                    "judge `{}`: weight must be a finite number of at least 0.0, got {}",
+                    j.name,
+                    j.weight
+                );
             }
             if let Some(p) = &j.provider {
                 // Checked against the *active* set, not everything configured:
@@ -993,6 +997,23 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.judges[0].provider = Some("anthropic".into());
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn a_non_finite_judge_weight_is_rejected() {
+        // Infinity makes every weighted share NaN, so the verdict, the
+        // severity mean and the dissent figure all become meaningless.
+        for weight in [f64::INFINITY, f64::NAN, f64::NEG_INFINITY, -1.0] {
+            let mut cfg = Config::default();
+            cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+            cfg.judges.push(JudgeConfig {
+                name: "bad".into(),
+                provider: None,
+                weight,
+                traits: TraitConfig::default(),
+            });
+            assert!(cfg.validate().is_err(), "weight {weight} must be rejected");
+        }
     }
 
     #[test]

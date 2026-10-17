@@ -27,6 +27,17 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
         }
     );
 
+    // Before the findings, not after: these are the reasons to trust the
+    // findings less, and a reader who stops after the first screen should
+    // still have seen them.
+    if !outcome.warnings.is_empty() {
+        let _ = writeln!(s, "## Caveats from this run\n");
+        for w in &outcome.warnings {
+            let _ = writeln!(s, "- {w}");
+        }
+        let _ = writeln!(s);
+    }
+
     let confirmed = outcome.confirmed_findings();
 
     if confirmed.is_empty() {
@@ -83,6 +94,13 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
             }
             if !f.raw.evidence.trim().is_empty() {
                 let _ = writeln!(s, "```\n{}\n```\n", f.raw.evidence.trim());
+            }
+            if let Some(note) = f.grounding.note() {
+                let _ = writeln!(
+                    s,
+                    "> **Citation check:** {note}. The defect may still be real; the reference to \
+                     it did not resolve.\n"
+                );
             }
             if !r.panel.is_empty() {
                 let (backing, total) = r.tally();
@@ -242,8 +260,16 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
         );
     }
 
-    if let Some(gen) = outcome.generations.first() {
-        if let Some(ruling) = gen.rulings.iter().find(|r| !r.panel.is_empty()) {
+    // Built from the widest panel seen anywhere in the run, not from whichever
+    // ruling happens to be first: a ruling whose judges partly failed would
+    // otherwise be reported as the panel's composition.
+    {
+        let widest = outcome
+            .generations
+            .iter()
+            .flat_map(|g| g.rulings.iter())
+            .max_by_key(|r| r.panel.len());
+        if let Some(ruling) = widest {
             if ruling.panel.len() > 1 {
                 let _ = writeln!(s, "\n### Judging panel\n");
                 for v in &ruling.panel {
