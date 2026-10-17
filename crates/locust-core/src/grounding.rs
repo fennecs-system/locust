@@ -75,7 +75,10 @@ fn check(text: &str, finding: &Finding) -> Grounding {
         return Grounding::Verified;
     }
 
-    let haystack: Vec<String> = lines.iter().map(|l| squash(l)).collect();
+    // Two passes, because models quote loosely. The first catches a clean
+    // single-line quote; the second catches the common case of several source
+    // lines collapsed into one, reindented, or interrupted by an ellipsis.
+    let by_line: Vec<String> = lines.iter().map(|l| squash(l)).collect();
     let quoted: Vec<String> = evidence
         .lines()
         .map(squash)
@@ -88,12 +91,46 @@ fn check(text: &str, finding: &Finding) -> Grounding {
         return Grounding::Verified;
     }
 
-    let matched = quoted.iter().filter(|q| haystack.iter().any(|h| h.contains(*q))).count();
-    if matched == 0 {
-        Grounding::EvidenceNotFound { quoted_lines: quoted.len() }
-    } else {
-        Grounding::Verified
+    if quoted.iter().any(|q| by_line.iter().any(|h| h.contains(q))) {
+        return Grounding::Verified;
     }
+
+    // Whitespace carries no meaning in most languages and none at all in a
+    // reformatted quote, so compare with it removed entirely and ask only for
+    // one distinctive run in common. A reviewer that read the code will share
+    // a long run with it; one that invented the code will not.
+    let dense_file = strip_ws(text);
+    if quoted.iter().any(|q| shares_a_run(&strip_ws(q), &dense_file)) {
+        return Grounding::Verified;
+    }
+
+    Grounding::EvidenceNotFound { quoted_lines: quoted.len() }
+}
+
+/// Shortest run of identical, whitespace-free source that counts as having
+/// actually read the file. Long enough that boilerplate does not match by
+/// accident, short enough to survive an elision mid-quote.
+const MIN_SHARED_RUN: usize = 40;
+
+/// Whether `needle` and `hay` share enough contiguous source to show the
+/// reviewer read the file.
+///
+/// A quote shorter than the threshold has no room for an elision, so it has to
+/// appear in full. A longer one only needs one distinctive run in common,
+/// which is what survives reformatting and a `...` through the middle.
+fn shares_a_run(needle: &str, hay: &str) -> bool {
+    let chars: Vec<char> = needle.chars().collect();
+    if chars.len() < MIN_SHARED_RUN {
+        return hay.contains(needle);
+    }
+    (0..=chars.len() - MIN_SHARED_RUN).any(|i| {
+        let window: String = chars[i..i + MIN_SHARED_RUN].iter().collect();
+        hay.contains(&window)
+    })
+}
+
+fn strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 fn normalize(path: &str) -> String {
@@ -190,6 +227,57 @@ mod tests {
             "fn take(n: usize) -> usize {\n...\n    // paraphrased by the reviewer\n",
         );
         assert_eq!(check(SRC, &f), Grounding::Verified);
+    }
+
+    /// A false positive from the first two-provider run: both reviewers quoted
+    /// real code, but collapsed several source lines into one and elided the
+    /// middle with `...`. Line-by-line matching saw nothing and the panel was
+    /// told the evidence was invented.
+    #[test]
+    fn a_genuine_quote_reformatted_onto_one_line_is_not_called_invented() {
+        let src = "\
+            Extract::JsonLinesWhere { path, key, equals } => jsonl(&stdout)\n\
+                .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))\n\
+                .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))\n\
+                .collect::<Vec<_>>()\n";
+
+        let quoted = "cli.rs: `Extract::JsonLinesWhere { path, key, equals } => \
+                      jsonl(&stdout).filter(|v| dig(v, key).and_then(|k| k.as_str()) == \
+                      Some(equals.as_str())).filter_map(...).collect::<Vec<_>>()` has no check";
+
+        let f = finding("a.rs", Some(1), quoted);
+        assert_eq!(check(src, &f), Grounding::Verified);
+    }
+
+    #[test]
+    fn invented_code_is_still_caught_by_the_looser_check() {
+        let src = "Extract::JsonLinesWhere { path, key, equals } => jsonl(&stdout)\n";
+        // Plausible, same vocabulary, but not what the file says.
+        let f = finding(
+            "a.rs",
+            Some(1),
+            "self.registry.lookup(&key).and_then(|entry| entry.resolve(path)).unwrap_or_default()",
+        );
+        assert!(matches!(check(src, &f), Grounding::EvidenceNotFound { .. }));
+    }
+
+    #[test]
+    fn short_quotes_must_match_in_full_but_long_ones_may_be_elided() {
+        // Under the run threshold: nothing to elide, so it has to be there.
+        let short = strip_ws("cache.insert(key, value);");
+        assert!(shares_a_run(&short, &strip_ws("self.cache.insert(key, value); // ok")));
+        assert!(!shares_a_run(&short, &strip_ws("self.cache.remove(&key);")));
+
+        // Over the threshold: one distinctive run in common is enough, even
+        // though the tail of the quote was never in the file.
+        let long = strip_ws(
+            "fn reconcile_pending_sessions(&mut self, deadline: Instant) -> Result<usize> { ... }",
+        );
+        let file = strip_ws(
+            "// leading\nfn reconcile_pending_sessions(&mut self, deadline: Instant) -> Result<usize> {\n    todo!()\n}",
+        );
+        assert!(shares_a_run(&long, &file));
+        assert!(!shares_a_run(&long, &strip_ws("fn something_entirely_different() -> () {}")));
     }
 
     #[test]

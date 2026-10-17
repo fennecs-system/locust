@@ -147,7 +147,11 @@ fn half() -> f32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AttackReport {
-    #[serde(default)]
+    // Deliberately *not* `#[serde(default)]`. With a default, every JSON
+    // object in the output deserializes into this type successfully as an
+    // empty report -- so a stray `{"status":"scanning"}` emitted before the
+    // real answer wins the span scan and silently discards it. Requiring the
+    // key is what makes shape-matching mean anything.
     pub findings: Vec<RawFinding>,
 }
 
@@ -273,7 +277,11 @@ pub struct RawRebuttal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DefenseReport {
-    #[serde(default)]
+    // Deliberately *not* `#[serde(default)]`. With a default, every JSON
+    // object in the output deserializes into this type successfully as an
+    // empty report -- so a stray `{"status":"scanning"}` emitted before the
+    // real answer wins the span scan and silently discards it. Requiring the
+    // key is what makes shape-matching mean anything.
     pub rebuttals: Vec<RawRebuttal>,
 }
 
@@ -315,7 +323,11 @@ fn yes() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JudgeReport {
-    #[serde(default)]
+    // Deliberately *not* `#[serde(default)]`. With a default, every JSON
+    // object in the output deserializes into this type successfully as an
+    // empty report -- so a stray `{"status":"scanning"}` emitted before the
+    // real answer wins the span scan and silently discards it. Requiring the
+    // key is what makes shape-matching mean anything.
     pub rulings: Vec<RawRuling>,
 }
 
@@ -667,7 +679,11 @@ pub struct Theme {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SynthesisReport {
-    #[serde(default)]
+    // Deliberately *not* `#[serde(default)]`. With a default, every JSON
+    // object in the output deserializes into this type successfully as an
+    // empty report -- so a stray `{"status":"scanning"}` emitted before the
+    // real answer wins the span scan and silently discards it. Requiring the
+    // key is what makes shape-matching mean anything.
     pub themes: Vec<Theme>,
 }
 

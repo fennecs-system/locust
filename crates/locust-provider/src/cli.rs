@@ -211,12 +211,30 @@ impl Provider for CliProvider {
                 .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
                 .collect::<Vec<_>>()
                 .join(""),
+            // The *last* matching record, not all of them joined. An agent
+            // that narrates progress before answering would otherwise have its
+            // commentary spliced ahead of the report, and whichever JSON came
+            // first would be read as the answer.
             Extract::JsonLinesWhere { path, key, equals } => jsonl(&stdout)
                 .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))
                 .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
-                .collect::<Vec<_>>()
-                .join("\n"),
+                .last()
+                .unwrap_or_default(),
         };
+
+        // A tool can exit 0 having produced no reply at all -- codex ends a
+        // failed turn with an `error` item and no `agent_message`. Returning
+        // an empty string here makes that look like a reviewer that read the
+        // change and found nothing, which is the most expensive way to fail.
+        if text.trim().is_empty() {
+            bail!(
+                "provider `{}` exited successfully but produced no reply on `{}`: {}",
+                self.settings.name,
+                req.label,
+                stream_errors(&stdout)
+                    .unwrap_or_else(|| failure_detail(&stdout, &String::from_utf8_lossy(&out.stderr)))
+            );
+        }
 
         let mut usage = Usage::default();
         if let Some(path) = &self.spec.usage_path {
@@ -258,6 +276,35 @@ impl Provider for CliProvider {
             provider: self.settings.name.clone(),
             model: self.settings.model.clone(),
         })
+    }
+}
+
+/// Error text a JSONL stream reported about itself, if any.
+///
+/// A CLI that fails mid-turn says so in its own event stream rather than on
+/// stderr, and that message is the only thing that explains an empty reply.
+fn stream_errors(stdout: &str) -> Option<String> {
+    let mut messages: Vec<String> = Vec::new();
+    for value in jsonl(stdout) {
+        for key in ["item", "msg", "error"] {
+            let Some(node) = dig(&value, key) else { continue };
+            let is_error = node.get("type").and_then(|t| t.as_str()) == Some("error")
+                || value.get("type").and_then(|t| t.as_str()).is_some_and(|t| t.contains("error"))
+                || value.get("type").and_then(|t| t.as_str()) == Some("turn.failed");
+            if !is_error {
+                continue;
+            }
+            if let Some(text) =
+                node.get("message").or_else(|| node.get("text")).and_then(|m| m.as_str())
+            {
+                messages.push(text.to_string());
+            }
+        }
+    }
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages.join("; ").chars().take(600).collect())
     }
 }
 
@@ -623,6 +670,44 @@ mod tests {
         assert_eq!(text, r#"{"findings":[]}"#);
         assert!(!text.contains("working notes"), "reasoning leaked into the reply");
         assert!(!text.contains("grep"), "a tool call leaked into the reply");
+    }
+
+    /// Raised by codex reviewing the adapter written for it: joining every
+    /// agent message let a progress note ahead of the report be parsed as the
+    /// report. Only the final message is the answer.
+    #[test]
+    fn only_the_final_agent_message_is_the_reply() {
+        let stream = concat!(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"scanning\"}"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[1]}"}}"#,
+            "\n",
+        );
+        let Extract::JsonLinesWhere { path, key, equals } = &codex_spec().extract else {
+            panic!("codex must filter the transcript");
+        };
+        let text = jsonl(stream)
+            .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))
+            .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
+            .last()
+            .unwrap_or_default();
+        assert_eq!(text, r#"{"findings":[1]}"#);
+        assert!(!text.contains("scanning"), "a progress note was spliced in ahead of the report");
+    }
+
+    /// Raised by claude reviewing the same adapter: a turn that fails after
+    /// exiting 0 produces no agent message, and an empty reply reads exactly
+    /// like a reviewer that found nothing.
+    #[tokio::test]
+    async fn an_empty_reply_is_a_failure_that_explains_itself() {
+        let mut spec = codex_spec();
+        let stream = r#"{"type":"item.completed","item":{"type":"error","message":"stream disconnected before completion"}}"#;
+        spec.command = vec!["sh".into(), "-c".into(), format!("echo '{stream}'")];
+
+        let provider = CliProvider::new(settings(30), spec).unwrap();
+        let err = provider.complete(Request::new("t", "s", "p")).await.unwrap_err().to_string();
+        assert!(err.contains("produced no reply"), "got: {err}");
+        assert!(err.contains("stream disconnected"), "the stream's own error must surface: {err}");
     }
 
     #[test]
