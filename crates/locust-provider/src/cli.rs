@@ -24,6 +24,14 @@ pub enum Extract {
     JsonPath(String),
     /// stdout is JSONL; concatenate the given path from every line that has it.
     JsonLines(String),
+    /// stdout is JSONL and carries more than one kind of record. Concatenate
+    /// `path` only from lines where `key` equals `equals`.
+    ///
+    /// Needed by any CLI that streams a transcript rather than a reply: codex
+    /// emits one `item.completed` per tool call, per reasoning step and per
+    /// message, so taking every item's text would splice the agent's working
+    /// notes into its answer.
+    JsonLinesWhere { path: String, key: String, equals: String },
 }
 
 #[derive(Debug, Clone)]
@@ -199,28 +207,42 @@ impl Provider for CliProvider {
                     .and_then(|v| v.as_str().map(str::to_string))
                     .with_context(|| format!("no string at `{path}` in CLI output"))?
             }
-            Extract::JsonLines(path) => stdout
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            Extract::JsonLines(path) => jsonl(&stdout)
                 .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
                 .collect::<Vec<_>>()
                 .join(""),
+            Extract::JsonLinesWhere { path, key, equals } => jsonl(&stdout)
+                .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))
+                .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
+                .collect::<Vec<_>>()
+                .join("\n"),
         };
 
         let mut usage = Usage::default();
         if let Some(path) = &self.spec.usage_path {
+            // A JSONL transcript carries its totals on one of its lines, not in
+            // a single document, so look there first and fall back to parsing
+            // stdout whole. Taking the last match means a stream that reports
+            // running totals ends on the final figure.
+            let found = jsonl(&stdout)
+                .filter_map(|v| dig(&v, path).cloned())
+                .last()
+                .or_else(|| {
+                    extract_json::<serde_json::Value>(&stdout)
+                        .ok()
+                        .and_then(|v| dig(&v, path).cloned())
+                });
+
+            if let Some(u) = found {
+                usage.input_tokens =
+                    u["input_tokens"].as_u64().or_else(|| u["prompt_tokens"].as_u64()).unwrap_or(0);
+                usage.output_tokens = u["output_tokens"]
+                    .as_u64()
+                    .or_else(|| u["completion_tokens"].as_u64())
+                    .unwrap_or(0);
+            }
+            // Many CLIs report cost directly; prefer that over our estimate.
             if let Ok(v) = extract_json::<serde_json::Value>(&stdout) {
-                if let Some(u) = dig(&v, path) {
-                    usage.input_tokens = u["input_tokens"]
-                        .as_u64()
-                        .or_else(|| u["prompt_tokens"].as_u64())
-                        .unwrap_or(0);
-                    usage.output_tokens = u["output_tokens"]
-                        .as_u64()
-                        .or_else(|| u["completion_tokens"].as_u64())
-                        .unwrap_or(0);
-                }
-                // Many CLIs report cost directly; prefer that over our estimate.
                 if let Some(cost) = v["total_cost_usd"].as_f64().or_else(|| v["cost_usd"].as_f64()) {
                     usage.cost_usd = cost;
                 }
@@ -293,6 +315,13 @@ fn failure_detail(stdout: &str, stderr: &str) -> String {
     }
 }
 
+/// Parse stdout as JSONL, skipping anything that is not a JSON object. CLIs
+/// interleave plain-text notices with their event stream often enough that a
+/// strict parse would throw the whole transcript away.
+fn jsonl(stdout: &str) -> impl Iterator<Item = serde_json::Value> + '_ {
+    stdout.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+}
+
 /// Follow a slash-separated path into a JSON value.
 fn dig<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     path.split('/').filter(|s| !s.is_empty()).try_fold(v, |acc, key| match key.parse::<usize>() {
@@ -334,17 +363,37 @@ pub fn preset(name: &str) -> Option<(CliSpec, &'static str)> {
         ),
         "codex" => (
             CliSpec {
-                command: ["codex", "exec", "--json", "--skip-git-repo-check", "-"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
+                // `codex exec` has no system-prompt flag, so the two are
+                // concatenated on stdin. `--sandbox read-only` is codex's own
+                // isolation: a reviewer needs to read and nothing else.
+                command: [
+                    "codex",
+                    "exec",
+                    "--json",
+                    "--sandbox",
+                    "read-only",
+                    "--skip-git-repo-check",
+                    "-m",
+                    "{model}",
+                    "-",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
                 stdin: Some("{system}\n\n{prompt}".into()),
-                extract: Extract::JsonLines("msg/message".into()),
-                usage_path: None,
+                // codex streams a transcript: one `item.completed` per tool
+                // call, reasoning step and message. Only the messages are the
+                // reply.
+                extract: Extract::JsonLinesWhere {
+                    path: "item/text".into(),
+                    key: "item/type".into(),
+                    equals: "agent_message".into(),
+                },
+                usage_path: Some("usage".into()),
                 env: HashMap::new(),
                 wrapper: Vec::new(),
             },
-            "gpt-5",
+            "gpt-6.1-sol",
         ),
         "gemini" => (
             CliSpec {
@@ -536,6 +585,70 @@ mod tests {
     fn total_silence_is_said_out_loud_rather_than_left_blank() {
         assert_eq!(failure_detail("", ""), "no output on stdout or stderr");
         assert!(!failure_detail("  \n ", " ").is_empty());
+    }
+
+    /// Shaped from a real `codex exec --json` transcript. The preset originally
+    /// guessed `msg/message`, which matches nothing in this stream.
+    const CODEX_STREAM: &str = concat!(
+        r#"{"type":"thread.started","thread_id":"01a1"}"#,
+        "\n",
+        r#"{"type":"turn.started"}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"working notes that must not leak into the reply"}}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","text":"grep -rn foo ."}}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"{\"findings\":[]}"}}"#,
+        "\n",
+        r#"{"type":"turn.completed","usage":{"input_tokens":14176,"cached_input_tokens":12288,"output_tokens":5}}"#,
+        "\n",
+    );
+
+    fn codex_spec() -> CliSpec {
+        let (spec, _) = preset("codex").expect("codex preset");
+        spec
+    }
+
+    #[test]
+    fn the_codex_preset_takes_only_the_agent_message() {
+        let Extract::JsonLinesWhere { path, key, equals } = &codex_spec().extract else {
+            panic!("codex must filter the transcript, not concatenate it");
+        };
+        let text: String = jsonl(CODEX_STREAM)
+            .filter(|v| dig(v, key).and_then(|k| k.as_str()) == Some(equals.as_str()))
+            .filter_map(|v| dig(&v, path).and_then(|v| v.as_str().map(str::to_string)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(text, r#"{"findings":[]}"#);
+        assert!(!text.contains("working notes"), "reasoning leaked into the reply");
+        assert!(!text.contains("grep"), "a tool call leaked into the reply");
+    }
+
+    #[test]
+    fn usage_is_read_from_the_line_that_carries_it() {
+        let usage: Vec<_> = jsonl(CODEX_STREAM).filter_map(|v| dig(&v, "usage").cloned()).collect();
+        let last = usage.last().expect("a usage record");
+        assert_eq!(last["input_tokens"].as_u64(), Some(14176));
+        assert_eq!(last["output_tokens"].as_u64(), Some(5));
+    }
+
+    #[test]
+    fn a_plain_text_notice_amid_the_stream_does_not_discard_it() {
+        let polluted = format!("warning: using fallback metadata\n{CODEX_STREAM}");
+        assert_eq!(jsonl(&polluted).count(), 6, "the JSON lines still parse");
+    }
+
+    #[test]
+    fn the_codex_preset_pins_a_model_and_its_own_sandbox() {
+        let spec = codex_spec();
+        let argv = spec.command.join(" ");
+        // `gpt-5` was not a model this codex knows; passing one it does keeps
+        // runs reproducible and fails loudly rather than silently drifting.
+        assert!(argv.contains("-m {model}"), "model must be explicit: {argv}");
+        assert!(argv.contains("--sandbox read-only"), "a reviewer only reads: {argv}");
+        // No system-prompt flag exists, so both halves go in on stdin.
+        assert_eq!(spec.stdin.as_deref(), Some("{system}\n\n{prompt}"));
     }
 
     #[test]

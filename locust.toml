@@ -55,7 +55,7 @@ judge_batch = 8
 # panel to one provider, which keeps temperament diversity but loses vendor
 # diversity.
 judge_excludes_author = true
-judge = "claude-cli"
+# judge = "claude-cli"   # unset: rotate judging across non-authoring providers
 
 
 [context]
@@ -246,11 +246,11 @@ timeout_secs = 900
 # you can override any of these per provider:
 #   command = ["codex", "exec", "--json", "--skip-git-repo-check", "-"]
 #   extract = { json_lines = "msg/message" }
-# [[provider]]
-# name = "codex-cli"
-# kind = "cli"
-# preset = "codex"
-# timeout_secs = 900
+[[provider]]
+name = "codex-cli"
+kind = "cli"
+preset = "codex"
+timeout_secs = 900
 
 # `gemini` is not on PATH:
 # [[provider]]

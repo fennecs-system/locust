@@ -492,9 +492,22 @@ fn enabled_default() -> bool {
 impl ProviderConfig {
     fn settings(&self) -> ProviderSettings {
         let d = ProviderSettings::default();
+        // A CLI preset knows which model its tool actually accepts; without
+        // this the name-based guess wins and a codex provider is launched with
+        // `-m unknown`.
+        let from_preset = match (self.kind, self.preset.as_deref()) {
+            (ProviderKind::Cli, Some(name)) => {
+                locust_provider::cli::preset(name).map(|(_, model)| model.to_string())
+            }
+            _ => None,
+        };
         ProviderSettings {
             name: self.name.clone(),
-            model: self.model.clone().unwrap_or_else(|| default_model(&self.name, self.wire)),
+            model: self
+                .model
+                .clone()
+                .or(from_preset)
+                .unwrap_or_else(|| default_model(&self.name, self.wire)),
             max_tokens: self.max_tokens.unwrap_or(d.max_tokens),
             temperature: self.temperature.unwrap_or(d.temperature),
             timeout_secs: self.timeout_secs.unwrap_or(d.timeout_secs),
@@ -811,6 +824,22 @@ mod tests {
     fn slugs_are_filesystem_safe() {
         assert_eq!(slug("Concurrency Hawk!"), "concurrency-hawk");
         assert_eq!(slug("  --weird__name  "), "weird-name");
+    }
+
+    /// A CLI preset carries the model id its tool will accept. Losing it means
+    /// the provider launches with whatever the name-based guess produced --
+    /// `unknown` for `codex-cli`, which codex rejects.
+    #[test]
+    fn a_cli_preset_supplies_the_model_when_the_config_does_not() {
+        let mut pc = sample_provider("codex-cli", ProviderKind::Cli);
+        pc.preset = Some("codex".into());
+        pc.model = None;
+        assert_eq!(pc.settings().model, "gpt-6.1-sol");
+        assert_ne!(pc.settings().model, "unknown");
+
+        // An explicit model still wins.
+        pc.model = Some("gpt-6.1-sol-mini".into());
+        assert_eq!(pc.settings().model, "gpt-6.1-sol-mini");
     }
 
     #[test]
