@@ -421,7 +421,7 @@ mod tests {
             (30, "put() evicts another session when updating a key, even though put() holds the lock.",
                 Classified::Real { defect: "put-evicts-on-update".into() }),
             (47, "purge_expired() deletes a refreshed session after taking its stale snapshot.",
-                Classified::Unclassified),
+                Classified::Real { defect: "purge-deletes-refreshed-session".into() }),
         ];
         for (line, text, expected) in examples {
             let mut f = finding("src/cache.py", Some(line), text, "");
@@ -434,6 +434,23 @@ mod tests {
         let mut reversed = case.manifest.defects.clone();
         reversed.reverse();
         assert_eq!(classify(&ambiguous, &reversed), Classified::Unclassified);
+    }
+
+    #[test]
+    fn reported_resurrection_is_already_covered_by_unlocked_reads() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/session-cache");
+        let case = Case::load(&root).unwrap();
+        // Verbatim finding from the live run cited by the handoff. Its title,
+        // claim and scenario must all be tested for keyword collisions.
+        let mut reported = finding("src/cache.py", Some(25),
+            r#"Unlocked refresh in get() resurrects a session just evicted by put()"#,
+            r#"get() reads the entry, then later writes `self._entries[key] = (value, time.time() + self.ttl)` without holding `self._lock`. If put() evicts that key under the lock between get's read and its write-back, get re-inserts the evicted session with a fresh TTL. This undoes the eviction and pushes the store past max_entries."#);
+        reported.raw.failure_scenario = r#"The cache is full. Thread A in get('u1') has read `entry` and passed the expiry check. Thread B in put('u2') holds the lock, finds 'u1' coldest, and deletes it from _entries and _hits, then inserts 'u2'. Thread A resumes and runs `self._hits['u1'] = 0+1` and `self._entries['u1'] = (value, now+ttl)`. 'u1' is alive again with a full new TTL, and len(_entries) == max_entries+1. The same happens if purge_expired removes the key in that window. Each such race adds one more entry beyond the bound."#.into();
+        let expected = Classified::Real { defect: "unlocked-read-write".into() };
+        assert_eq!(classify(&reported, &case.manifest.defects), expected);
+        let mut reversed = case.manifest.defects.clone();
+        reversed.reverse();
+        assert_eq!(classify(&reported, &reversed), expected);
     }
 
     fn defect(id: &str, kind: DefectKind, file: &str, lines: Option<[u32; 2]>, matches: &[&str]) -> Defect {

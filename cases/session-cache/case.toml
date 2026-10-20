@@ -31,6 +31,8 @@ severity = "high"
 summary = """
 get() became a writer (hit counting and sliding expiry) but stays outside the
 lock that put() holds, so the lock serialises writers against each other only.
+For example, a read can restore a session evicted by a concurrent put(), taking
+the cache past max_entries. That is a consequence of this same unlocked writer.
 """
 matches = ["get()", "lock"]
 
@@ -79,6 +81,20 @@ session and drops the resident set below max_entries.
 # Surfaced as an unclassified finding on the first benchmark run: a real defect
 # the case author missed. That is what the triage column is for.
 matches = ["put()", "evict", "updat"]
+
+[[defect]]
+id = "purge-deletes-refreshed-session"
+kind = "real"
+file = "src/cache.py"
+lines = [44, 49]
+severity = "high"
+summary = """
+purge_expired() snapshots expired keys, then deletes them without checking
+whether put() has refreshed the session in the meantime. A fresh login can
+therefore be removed using the old session's expiry decision. The snapshot
+prevents a dictionary-iteration exception, but does not protect replacements.
+"""
+matches = ["purge_expired()", "refresh", "snapshot"]
 
 # --------------------------------------------------------------- decoys ----
 #

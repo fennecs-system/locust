@@ -205,8 +205,12 @@ command = ["docker", "run", "--rm", "--network=none",
            "-v", "{workspace}:/w", "-w", "/w", "locust-agent"]
 ```
 
-`{workspace}` is the agent's private checkout and `{id}` its label. The same
-shape covers `systemd-run --scope -p MemoryMax=2G --`, `nix develop ... -c`,
+`{workspace}` is the agent's working directory and `{id}` its label. With a
+private checkout, it points to that checkout at the target revision. When
+workspaces are disabled or checkout creation fails, it points to the live
+repository root. A read-write mount then exposes your working tree; use
+`{workspace}:/w:ro` for read-only review. The same shape covers
+`systemd-run --scope -p MemoryMax=2G --`, `nix develop ... -c`,
 `bwrap --unshare-net --`, a Firecracker wrapper script, or anything else that
 takes a command as its tail. Only CLI providers spawn processes, so only they
 are affected; a provider can opt out with `sandbox = false`.
@@ -233,8 +237,11 @@ blocks the agent: allow the API host and nothing else.
 
 ## Isolation
 
-Each agent that needs a filesystem gets its own checkout at the target revision,
-under `.locust/wt/`, destroyed when it finishes. `git worktree` is the default
+With `workspaces = "auto"` (the default), each filesystem-capable agent gets a
+checkout at the target revision under `.locust/wt/`, destroyed when it finishes.
+`always` requests a checkout for every provider; `never` uses the live repository
+root. Checkout creation failures also fall back to that root, whose checked-out
+revision may differ from the configured target. `git worktree` is the default
 and needs nothing installed. A `jj` backend sits behind the same trait and is
 picked automatically in a jj workspace — anonymous heads make a generation of
 speculative workspaces free to create and discard, and the operation log lets

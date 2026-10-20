@@ -187,7 +187,8 @@ pub struct RunConfig {
     /// `auto` prefers jj when the repo is a jj workspace.
     pub vcs: VcsChoice,
     /// Whether agents get their own checkout. `auto` gives one to any provider
-    /// that can use it.
+    /// that can use it. Disabled or failed checkouts fall back to the live
+    /// repository root, including for sandbox wrapper mounts.
     pub workspaces: WorkspacePolicy,
     /// Restrict the arena to a subset of the configured providers.
     #[serde(default)]
