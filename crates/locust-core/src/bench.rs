@@ -211,13 +211,16 @@ pub enum Classified {
 /// Both the location and the keywords have to agree. Location alone credits a
 /// finding to its neighbour, since planted defects cluster; keywords alone
 /// credit a finding in an unrelated file that happens to use the same words.
+/// Quoted evidence is excluded: it may contain unrelated code. Ambiguous
+/// matches are left for human triage rather than settled by manifest order.
 pub fn classify(finding: &Finding, defects: &[Defect]) -> Classified {
     let haystack = format!(
-        "{} {} {} {}",
-        finding.raw.title, finding.raw.claim, finding.raw.failure_scenario, finding.raw.evidence
+        "{} {} {}",
+        finding.raw.title, finding.raw.claim, finding.raw.failure_scenario
     )
     .to_lowercase();
 
+    let mut matched = None;
     for defect in defects {
         if normalize(&defect.file) != normalize(&finding.raw.file) {
             continue;
@@ -231,12 +234,16 @@ pub fn classify(finding: &Finding, defects: &[Defect]) -> Classified {
         if !defect.matches.iter().all(|m| haystack.contains(&m.to_lowercase())) {
             continue;
         }
-        return match defect.kind {
+        // Multiple plausible claims need human triage, regardless of manifest order.
+        if matched.is_some() {
+            return Classified::Unclassified;
+        }
+        matched = Some(match defect.kind {
             DefectKind::Real => Classified::Real { defect: defect.id.clone() },
             DefectKind::Decoy => Classified::Decoy { defect: defect.id.clone() },
-        };
+        });
     }
-    Classified::Unclassified
+    matched.unwrap_or(Classified::Unclassified)
 }
 
 fn normalize(path: &str) -> String {
@@ -254,7 +261,7 @@ pub struct Scorecard {
     pub decoys_planted: usize,
     /// Decoys the arena confirmed. Every one is a failure of the defence.
     pub decoys_confirmed: Vec<String>,
-    /// Decoys an attacker raised and the arena correctly did not confirm.
+    /// Raised decoys with a refuted ruling and no confirmed ruling.
     pub decoys_caught: Vec<String>,
     /// Confirmed findings matching nothing planted; need a human to triage.
     pub unclassified: Vec<String>,
@@ -278,14 +285,11 @@ impl Scorecard {
         ratio(self.real_found.len(), self.real_planted)
     }
 
-    /// Share of *raised* decoys the arena refused to confirm, or `None` when
-    /// no attacker raised one.
+    /// Share of decisively judged decoys the arena refuted, or `None` when
+    /// no raised decoy received a confirmed or refuted ruling.
     ///
-    /// Counted over raised decoys rather than planted ones on purpose. A decoy
-    /// nobody mentions has not been resisted, it has not been tested, and
-    /// scoring it as a pass reports a defence that was never asked to do
-    /// anything as a defence that works. When this returns `None` the case
-    /// needs more tempting decoys, not a better defence.
+    /// Unraised, unjudged and undecided decoys contribute no evidence of
+    /// resistance and are excluded from both numerator and denominator.
     pub fn decoy_resistance(&self) -> Option<f64> {
         let tested = self.decoys_caught.len() + self.decoys_confirmed.len();
         if tested == 0 {
@@ -295,7 +299,7 @@ impl Scorecard {
         }
     }
 
-    /// Decoys no reviewer raised. These measure nothing.
+    /// Decoys without a decisive ruling, including those nobody raised.
     pub fn decoys_untested(&self) -> usize {
         self.decoys_planted
             .saturating_sub(self.decoys_caught.len() + self.decoys_confirmed.len())
@@ -357,13 +361,15 @@ impl Scorecard {
             }
         }
 
-        // A decoy counts as caught when some reviewer raised it and the arena
-        // did not confirm it. A decoy nobody noticed proves nothing about the
-        // defence, so it is neither credited nor held against it.
+        // Only a refuted ruling demonstrates rejection. Silence and uncertainty
+        // provide no evidence that the defence caught a false claim.
         let raised_decoys: Vec<String> = outcome
             .generations
             .iter()
-            .flat_map(|g| g.findings.iter())
+            .flat_map(|g| g.findings.iter().filter(|f| {
+                f.is_canonical() && verdict_of(&g.rulings, f)
+                    .is_some_and(|r| r.raw.verdict == Verdict::Refuted)
+            }))
             .filter_map(|f| match classify(f, &case.manifest.defects) {
                 Classified::Decoy { defect } => Some(defect),
                 _ => None,
@@ -402,6 +408,33 @@ pub fn verdict_of<'a>(rulings: &'a [Ruling], finding: &Finding) -> Option<&'a Ru
 mod tests {
     use super::*;
     use crate::model::{Grounding, RawFinding};
+
+    #[test]
+    fn the_session_cache_manifest_distinguishes_claims_not_function_names() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/session-cache");
+        let case = Case::load(&root).unwrap();
+        let examples = [
+            (43, "size() reads len(self._entries) without the lock, which looks like a data race.",
+                Classified::Decoy { defect: "size-race".into() }),
+            (47, "purge_expired() mutates _entries while iterating it: RuntimeError: dictionary changed size during iteration.",
+                Classified::Decoy { defect: "purge-mutation-during-iteration".into() }),
+            (30, "put() evicts another session when updating a key, even though put() holds the lock.",
+                Classified::Real { defect: "put-evicts-on-update".into() }),
+            (47, "purge_expired() deletes a refreshed session after taking its stale snapshot.",
+                Classified::Unclassified),
+        ];
+        for (line, text, expected) in examples {
+            let mut f = finding("src/cache.py", Some(line), text, "");
+            assert_eq!(classify(&f, &case.manifest.defects), expected);
+            f.raw.evidence = "get() lock _hits KeyError LRU put() evict update size() purge_expired() iteration".into();
+            assert_eq!(classify(&f, &case.manifest.defects), expected);
+        }
+        let ambiguous = finding("src/cache.py", Some(30), "get() has no lock and put() evicts when updating", "");
+        assert_eq!(classify(&ambiguous, &case.manifest.defects), Classified::Unclassified);
+        let mut reversed = case.manifest.defects.clone();
+        reversed.reverse();
+        assert_eq!(classify(&ambiguous, &reversed), Classified::Unclassified);
+    }
 
     fn defect(id: &str, kind: DefectKind, file: &str, lines: Option<[u32; 2]>, matches: &[&str]) -> Defect {
         Defect {

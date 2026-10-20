@@ -200,6 +200,15 @@ impl Provider for CliProvider {
             }
         };
 
+        // The direct child has exited and cannot consume more input. A
+        // descendant retaining stdin must not keep this request alive.
+        if let Some(w) = stdin_writer {
+            w.abort();
+            if let Ok(Err(e)) = w.await {
+                tracing::debug!(provider = %self.settings.name, "writing stdin failed: {e}");
+            }
+        }
+
         // The child is gone, but a descendant it spawned may still hold the
         // write end of either pipe, in which case these reads never finish.
         // Wait only briefly, then take whatever arrived: losing the tail of a
@@ -216,13 +225,6 @@ impl Provider for CliProvider {
                 provider = %self.settings.name,
                 "a descendant still holds an output pipe; using the output received so far"
             );
-        }
-        if let Some(w) = stdin_writer {
-            // Its failure is only interesting if the child also failed, and
-            // the exit status already says that.
-            if let Ok(Err(e)) = w.await {
-                tracing::debug!(provider = %self.settings.name, "writing stdin failed: {e}");
-            }
         }
 
         let take = |buf: &Arc<Mutex<Vec<u8>>>| {
@@ -603,6 +605,35 @@ mod tests {
 
     fn settings(timeout_secs: u64) -> ProviderSettings {
         ProviderSettings { name: "test".into(), timeout_secs, ..ProviderSettings::default() }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_descendant_holding_stdin_cannot_hold_the_request_open() {
+        let _guard = exclusive().await;
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Ok(pid) = std::fs::read_to_string(&self.0) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        unsafe { libc::kill(-pid, libc::SIGKILL); }
+                    }
+                }
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let cleanup = Cleanup(std::env::temp_dir().join(format!("locust-stdin-{}", std::process::id())));
+        let script = format!(
+            "echo $$ > '{}'; exec 3<&0; sleep 30 <&3 >/dev/null 2>&1 & echo ok",
+            cleanup.0.display()
+        );
+        let mut spec = spec(&["sh", "-c", &script]);
+        spec.stdin = Some("{prompt}".into());
+        let provider = CliProvider::new(settings(1), spec).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3),
+            provider.complete(Request::new("t", "s", "x".repeat(2 * 1024 * 1024))))
+            .await.expect("stdin writer must be cancelled after the parent exits").unwrap();
+        assert_eq!(result.text.trim(), "ok");
     }
 
     /// A timed-out agent used to be dropped, not killed: `wait_with_output`

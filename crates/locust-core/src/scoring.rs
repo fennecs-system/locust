@@ -64,7 +64,11 @@ pub fn score_generation(
             match by_id.get(canonical.as_str()).map(|r| r.raw.verdict) {
                 Some(Verdict::Confirmed) => {
                     out[i].confirmed += 1;
-                    out[i].score += cfg.duplicate;
+                    out[i].score += if by_id[canonical.as_str()].raw.novel {
+                        cfg.duplicate
+                    } else {
+                        cfg.stale_penalty.min(0.0)
+                    };
                 }
                 Some(Verdict::Refuted) => {
                     out[i].refuted += 1;
@@ -104,7 +108,7 @@ pub fn score_generation(
                 // Extra providers beyond the first that found it independently.
                 points += cfg.corroboration_bonus * f.corroboration.saturating_sub(1) as f64;
                 if !ruling.raw.novel {
-                    points += cfg.stale_penalty;
+                    points = cfg.stale_penalty.min(0.0);
                 }
                 out[i].score += points;
             }
@@ -267,6 +271,51 @@ mod tests {
         let with_stale = score_generation(&cfg, &ps, &findings, &[stale], 0.5);
         let with_fresh = score_generation(&cfg, &ps, &findings, &[fresh], 0.5);
         assert!(with_stale[0].score < with_fresh[0].score);
+    }
+
+    #[test]
+    fn settled_findings_never_pay_even_at_maximum_altitude() {
+        let cfg = ScoringConfig::default();
+        let ps = vec![persona("p"), persona("echo")];
+        let mut original = finding("f1", "p", Altitude::Architectural);
+        original.corroboration = 3;
+        let mut echo = finding("f2", "echo", Altitude::Architectural);
+        echo.duplicate_of = Some("f1".into());
+        let mut stale = ruling("f1", Verdict::Confirmed, Altitude::Architectural);
+        stale.raw.severity = Severity::High;
+        stale.raw.novel = false;
+        for fitness in score_generation(&cfg, &ps, &[original, echo], &[stale], 1.0) {
+            assert!(fitness.score <= 0.0, "{fitness:?}");
+            assert_eq!(fitness.confirmed, 1);
+        }
+    }
+
+    #[test]
+    fn lexical_duplicates_follow_judge_merges_for_credit_and_penalties() {
+        let cfg = ScoringConfig::default();
+        let ps = vec![persona("a"), persona("b"), persona("c")];
+        for verdict in [Verdict::Confirmed, Verdict::Refuted] {
+            let mut fs = vec![finding("a", "a", Altitude::Local),
+                finding("b", "b", Altitude::Local), finding("c", "c", Altitude::Local)];
+            fs[0].raw.title = "identical claim about a shared resource".into();
+            fs[1].raw.title = fs[0].raw.title.clone();
+            fs[2].raw.title = "distinct wording describing another symptom".into();
+            crate::dedup::cluster(&mut fs);
+            assert_eq!(fs[1].duplicate_of.as_deref(), Some("a"));
+            let mut merged = ruling("a", verdict, Altitude::Local);
+            merged.raw.duplicate_of = Some("c".into());
+            let mut rulings = vec![merged, ruling("c", verdict, Altitude::Local)];
+            let demoted = crate::dedup::apply_judge_duplicates(&mut fs, &rulings);
+            rulings.retain(|r| !demoted.contains(&r.raw.finding_id));
+            assert_eq!(fs[1].duplicate_of.as_deref(), Some("c"));
+            let scored = score_generation(&cfg, &ps, &fs, &rulings, 1.0);
+            let echo = scored.iter().find(|f| f.persona_id == "b").unwrap();
+            match verdict {
+                Verdict::Confirmed => assert_eq!(echo.score, cfg.duplicate),
+                Verdict::Refuted => assert_eq!(echo.score, cfg.refuted),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

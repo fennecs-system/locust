@@ -140,6 +140,9 @@ pub fn apply_judge_duplicates(findings: &mut [Finding], rulings: &[Ruling]) -> H
         for f in findings.iter_mut() {
             if f.cluster == old_cluster {
                 f.cluster = cluster.clone();
+                if f.id != target {
+                    f.duplicate_of = Some(target.clone());
+                }
             }
         }
         findings[i].duplicate_of = Some(target);

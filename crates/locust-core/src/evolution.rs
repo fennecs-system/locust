@@ -24,7 +24,7 @@ pub struct Brood {
     pub usage: Usage,
 }
 
-// Eight parameters, all of them distinct inputs the meta-prompt needs; bundling
+// These parameters are distinct inputs the meta-prompt needs; bundling
 // them into a struct would add a type whose only purpose is to satisfy a lint.
 #[allow(clippy::too_many_arguments)]
 pub async fn breed(
@@ -36,6 +36,7 @@ pub async fn breed(
     rulings: &[Ruling],
     next_generation: u32,
     pressure: f64,
+    workspace: &std::path::Path,
 ) -> Result<Brood> {
     let ev = &cfg.evolution;
     let target = cfg.arena.attackers.max(1);
@@ -125,7 +126,7 @@ pub async fn breed(
         let (p, f) = pool[(ev.elite + k) % pool.len()];
         let evidence = evidence_for(p, findings, rulings);
         let prompt = prompts::mutate(p, f, &evidence, pressure);
-        match call_meta(meta, &prompt, &format!("gen{next_generation}/mutate/{}", p.id)).await {
+        match call_meta(meta, &prompt, &format!("gen{next_generation}/mutate/{}", p.id), workspace).await {
             Ok((spec, u)) => {
                 usage.merge(&u);
                 // Temperament is inherited: the meta-prompt rewrites prose,
@@ -160,7 +161,7 @@ pub async fn breed(
             let pair = ((*a.0).clone(), a.1.clone());
             let pair_b = ((*b.0).clone(), b.1.clone());
             let prompt = prompts::crossover(&pair, &pair_b);
-            match call_meta(meta, &prompt, &format!("gen{next_generation}/crossover/{i}")).await {
+            match call_meta(meta, &prompt, &format!("gen{next_generation}/crossover/{i}"), workspace).await {
                 Ok((spec, u)) => {
                     usage.merge(&u);
                     let child = from_spec(
@@ -302,9 +303,11 @@ async fn call_meta(
     meta: &SharedProvider,
     prompt: &prompts::Prompt,
     label: &str,
+    workspace: &std::path::Path,
 ) -> Result<(PersonaSpec, Usage)> {
     let resp = meta
-        .complete(Request::new(label, &prompt.system, &prompt.user).temperature(1.0))
+        .complete(Request::new(label, &prompt.system, &prompt.user).temperature(1.0)
+            .in_workspace(Some(workspace.to_path_buf())))
         .await?;
     let spec: PersonaSpec = extract_json(&resp.text)?;
     anyhow::ensure!(

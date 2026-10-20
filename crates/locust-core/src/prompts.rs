@@ -360,8 +360,8 @@ pub fn judge(
     );
 
     let mut user = String::new();
-    // The judge always gets sources: it has no workspace and must be able to
-    // check a quoted guard for itself.
+    // The judge always gets sources so context-only providers can check
+    // a quoted guard for themselves.
     let _ = writeln!(user, "{}", pack.render(true));
 
     if !settled.is_empty() {

@@ -70,6 +70,8 @@ struct Scripted {
     /// Findings this provider's attackers raise, as (file, line, title, altitude).
     findings: Vec<(&'static str, u32, &'static str, &'static str)>,
     verdict: &'static str,
+    judge_limit: Option<usize>,
+    invalid_judge_ids: bool,
     /// Fail every call after this many, to exercise degradation.
     fail_after: Option<usize>,
     calls: AtomicUsize,
@@ -82,6 +84,8 @@ impl Scripted {
             name: name.into(),
             findings,
             verdict: "confirmed",
+            judge_limit: None,
+            invalid_judge_ids: false,
             fail_after: None,
             calls: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
@@ -129,7 +133,9 @@ impl Provider for Scripted {
             // Judge: rule on exactly the ids in the case file.
             let rulings: Vec<String> = ids_in(&req.prompt, "#### ")
                 .into_iter()
+                .take(self.judge_limit.unwrap_or(usize::MAX))
                 .map(|(id, altitude)| {
+                    let id = if self.invalid_judge_ids { "nonexistent".to_string() } else { id };
                     format!(
                         r#"{{"finding_id":"{id}","verdict":"{verdict}","severity":"high","altitude":"{altitude}","reasoning":"scripted","novel":true}}"#
                     )
@@ -1091,5 +1097,174 @@ async fn confirmed_findings_are_ranked_for_a_reader() -> Result<()> {
     let _ = Role::Attacker;
 
     std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_judgments_cannot_pass_a_review() -> Result<()> {
+    for (limit, invalid) in [(Some(0), false), (None, true), (Some(1), false)] {
+        let repo = fixture_repo()?;
+        let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+        let cfg = config(1, 1, &["alpha"]);
+        let mut provider = Scripted::new("alpha", vec![
+            ("src/pool.rs", 2, "arithmetic overflow", "local"),
+            ("src/pool.rs", 150, "unbounded resource retention", "module"),
+        ]);
+        provider.judge_limit = limit;
+        provider.invalid_judge_ids = invalid;
+        let arena = Arena::with_providers(cfg, vcs, vec![Arc::new(provider)], silent())?;
+        let err = arena.run().await.unwrap_err().to_string();
+        assert!(err.contains("every judge failed"), "{err}");
+        let warnings = std::fs::read_to_string(arena.run_dir().join("warnings.json"))?;
+        assert!(warnings.contains("incomplete judgment"), "{warnings}");
+        std::fs::remove_dir_all(repo).ok();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_refuted_decoys_receive_defence_credit() -> Result<()> {
+    use locust_core::bench::{Case, CaseManifest, Defect, DefectKind, Scorecard};
+    let repo = fixture_repo()?;
+    let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let cfg = config(1, 1, &["alpha"]);
+    let provider = Scripted::new("alpha", vec![("src/pool.rs", 2, "false alarm", "local")]).refuting();
+    let arena = Arena::with_providers(cfg.clone(), vcs, vec![Arc::new(provider)], silent())?;
+    let mut outcome = arena.run().await?;
+    let case = Case {
+        dir: repo.clone(),
+        manifest: CaseManifest {
+            name: "test".into(), description: String::new(), language: String::new(), notes: String::new(),
+            defects: vec![Defect {
+                id: "decoy".into(), kind: DefectKind::Decoy, file: "src/pool.rs".into(),
+                lines: None, severity: Severity::Low, summary: "false alarm".into(),
+                matches: vec!["false alarm".into()], why_safe: "safe".into(),
+            }],
+        },
+    };
+    assert_eq!(Scorecard::build(&case, &outcome).decoys_caught, vec!["decoy"]);
+    outcome.generations[0].rulings[0].raw.verdict = Verdict::Undecided;
+    let card = Scorecard::build(&case, &outcome);
+    assert!(card.decoys_caught.is_empty());
+    assert_eq!(card.decoy_resistance(), None);
+    let md = locust_core::report::markdown(&outcome, &cfg);
+    assert!(!md.contains("Every finding raised was refuted"));
+    outcome.generations[0].rulings.clear();
+    assert!(Scorecard::build(&case, &outcome).decoys_caught.is_empty());
+    std::fs::remove_dir_all(repo).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn judgment_gaps_fail_across_batches_and_later_generations() -> Result<()> {
+    struct Gap(Scripted, bool);
+    #[async_trait]
+    impl Provider for Gap {
+        fn name(&self) -> &str { self.0.name() }
+        fn model(&self) -> &str { self.0.model() }
+        async fn complete(&self, req: Request) -> Result<Response> {
+            let gap = req.label.contains("judge") && if self.1 {
+                req.label.starts_with("gen1-")
+            } else {
+                req.label.ends_with("-b0")
+            };
+            let mut response = self.0.complete(req).await?;
+            if gap { response.text = r#"{"rulings":[]}"#.into(); }
+            Ok(response)
+        }
+    }
+    for late in [false, true] {
+        let repo = fixture_repo()?;
+        let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+        let mut cfg = config(if late { 2 } else { 1 }, 1, &["alpha"]);
+        cfg.evolution.enabled = false;
+        cfg.arena.judge_batch = 1;
+        let provider = Gap(Scripted::new("alpha", vec![
+            ("src/pool.rs", 2, "arithmetic overflow", "local"),
+            ("src/pool.rs", 150, "unbounded resource retention", "module"),
+        ]), late);
+        let arena = Arena::with_providers(cfg, vcs, vec![Arc::new(provider)], silent())?;
+        let err = arena.run().await.unwrap_err().to_string();
+        assert!(err.contains("incomplete judgment"), "{err}");
+        if late {
+            let saved: locust_core::RunOutcome = serde_json::from_str(
+                &std::fs::read_to_string(arena.run_dir().join("report.json"))?)?;
+            assert_eq!(saved.generations.len(), 1, "completed work survives");
+        }
+        std::fs::remove_dir_all(repo).ok();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn every_cli_phase_uses_the_target_checkout_and_wrapper_workspace() -> Result<()> {
+    use locust_provider::cli::{CliProvider, CliSpec, Extract};
+    struct CheckedCli {
+        scripted: Scripted,
+        cli: CliProvider,
+        target: String,
+        phases: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Provider for CheckedCli {
+        fn name(&self) -> &str { self.scripted.name() }
+        fn model(&self) -> &str { self.scripted.model() }
+        fn needs_workspace(&self) -> bool { true }
+        async fn complete(&self, req: Request) -> Result<Response> {
+            let workspace = req.workspace.as_ref().expect("every phase has a workspace");
+            let checked = self.cli.complete(req.clone()).await?;
+            let lines: Vec<_> = checked.text.lines().collect();
+            assert_eq!(lines.len(), 3);
+            assert_eq!(Path::new(lines[0]).canonicalize()?, workspace.canonicalize()?);
+            assert_eq!(lines[1], self.target.trim(), "{} inspected the wrong revision", req.label);
+            assert_eq!(Path::new(lines[2]).canonicalize()?, workspace.canonicalize()?);
+            self.phases.lock().unwrap().push(req.label.clone());
+            self.scripted.complete(req).await
+        }
+    }
+    let repo = fixture_repo()?;
+    let target = git(&repo, &["rev-parse", "feature"])?;
+    git(&repo, &["checkout", "-q", "main"])?;
+    let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(2, 2, &["alpha"]);
+    cfg.run.target = "feature".into();
+    cfg.run.workspaces = locust_core::config::WorkspacePolicy::Auto;
+    let cli = CliProvider::new(locust_provider::ProviderSettings { timeout_secs: 5, ..Default::default() }, CliSpec {
+        command: vec!["sh".into(), "-c".into(), "pwd; git rev-parse HEAD; printf '%s\\n' \"$LOCUST_TEST_WORKSPACE\"".into()],
+        stdin: None, extract: Extract::Raw, usage_path: None, env: Default::default(),
+        wrapper: vec!["env".into(), "LOCUST_TEST_WORKSPACE={workspace}".into()],
+    })?;
+    let provider = Arc::new(CheckedCli {
+        scripted: Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect", "local")]),
+        cli, target, phases: Mutex::new(Vec::new()),
+    });
+    let arena = Arena::with_providers(cfg, vcs, vec![provider.clone()], silent())?;
+    arena.run().await?;
+    let phases = provider.phases.lock().unwrap();
+    for phase in ["-atk-", "-def-", "-judge", "synthesis", "/mutate/"] {
+        assert!(phases.iter().any(|label| label.contains(phase)), "missing {phase}: {phases:?}");
+    }
+    std::fs::remove_dir_all(repo).ok();
+    Ok(())
+}
+
+#[test]
+fn defender_skeptic_traits_target_the_code_so_claim_experiments_use_neutral_traits() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs = locust_vcs::detect(&repo, Some("git"))?;
+    let cfg = config(1, 1, &["alpha"]);
+    let range = vcs.range("main", "HEAD")?;
+    let pack = locust_core::context::ContextPack::build(vcs.as_ref(), &range, &cfg.context)?;
+    let mut defender = cfg.seed_personas(Role::Defender)?[0].clone();
+    defender.traits = locust_core::traits::Traits::preset("skeptic").unwrap();
+    let prompt = locust_core::prompts::defend(&defender, &pack, &[], false);
+    assert!(prompt.system.contains("Be hostile to this code."));
+    defender.traits = locust_core::traits::Traits::NEUTRAL;
+    defender.prompt = "Demand evidence for each claim; concede true defects.".into();
+    let prompt = locust_core::prompts::defend(&defender, &pack, &[], false);
+    assert!(!prompt.system.contains("Be hostile to this code."));
+    assert!(prompt.system.contains(&defender.prompt));
+    std::fs::remove_dir_all(repo).ok();
     Ok(())
 }

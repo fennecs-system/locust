@@ -400,10 +400,10 @@ async fn bench(
         }
         if c.decoys_untested() > 0 {
             println!(
-                "  {} {} decoy(s) no reviewer raised {}",
+                "  {} {} decoy(s) without a decisive ruling {}",
                 term::yellow("untested"),
                 c.decoys_untested(),
-                term::dim("(they measure nothing; make them more tempting)")
+                term::dim("(unraised, unjudged, or undecided)")
             );
         }
         if !c.decoys_caught.is_empty() {
@@ -411,7 +411,7 @@ async fn bench(
                 "  {} {} {}",
                 term::green("caught decoy"),
                 c.decoys_caught.join(", "),
-                term::dim("(raised, then correctly not confirmed)")
+                term::dim("(raised, then refuted)")
             );
         }
         println!(
@@ -430,7 +430,7 @@ async fn bench(
     println!(
         "\n{}",
         term::dim(
-            "recall: planted defects confirmed. decoys: non-defects correctly not confirmed. \
+            "recall: planted defects confirmed. decoys: refuted / decisively judged non-defects. \
              pushback: rebuttals that refuted or narrowed. triage: confirmed findings matching \
              nothing planted — often real, and worth adding to the case."
         )

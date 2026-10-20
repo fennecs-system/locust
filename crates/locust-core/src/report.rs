@@ -43,9 +43,8 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     if confirmed.is_empty() {
         let _ = writeln!(
             s,
-            "## No confirmed findings\n\nEvery finding raised was refuted by a defender and the \
-             judge agreed. That is a real result, not an empty one — see the per-generation \
-             breakdown below for what was argued."
+            "## No confirmed findings\n\nNo findings received a confirmed ruling. See the \
+             caveats and per-generation breakdown for what was raised and judged."
         );
     }
 

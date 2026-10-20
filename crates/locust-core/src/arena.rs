@@ -202,6 +202,7 @@ impl Arena {
 
         let mut generations: Vec<GenerationOutcome> = Vec::new();
         let mut settled: Vec<SettledFinding> = Vec::new();
+        let mut judging_aborted = false;
 
         for generation in 0..total {
             let pressure = scoring::pressure(generation, total);
@@ -225,6 +226,7 @@ impl Arena {
                     Ok(aborted) if generations.is_empty() => return Err(aborted.into()),
                     // Earlier generations stand; stop here and report them.
                     Ok(aborted) => {
+                        judging_aborted = aborted.phase == "judge";
                         self.warn(format!("{aborted}; reporting the {} generation(s) that completed", generations.len())).await;
                         break;
                     }
@@ -291,7 +293,10 @@ impl Arena {
             if !is_last && self.cfg.evolution.enabled {
                 (self.report)(Event::Breeding { generation });
                 let next_pressure = scoring::pressure(generation + 1, total);
-                match crate::evolution::breed(
+                let label = format!("gen{generation}-breed");
+                let wanted = prompts::wants_workspace(&self.cfg, self.meta.needs_workspace());
+                let ws = self.workspace(&label, wanted).await;
+                let brood = crate::evolution::breed(
                     &self.cfg,
                     &self.meta,
                     &population,
@@ -300,9 +305,10 @@ impl Arena {
                     &outcome.rulings,
                     generation + 1,
                     next_pressure,
-                )
-                .await
-                {
+                    ws.as_ref().map(|w| w.path.as_path()).unwrap_or(self.vcs.root()),
+                ).await;
+                self.release(ws).await;
+                match brood {
                     Ok(brood) => {
                         self.add_usage(&brood.usage).await;
                         attackers = brood
@@ -365,6 +371,9 @@ impl Arena {
             tracing::warn!("could not clean up workspaces: {e}");
         }
 
+        if judging_aborted {
+            bail!("incomplete judgment; completed generations saved in {}", self.store.run_dir.display());
+        }
         Ok(outcome)
     }
 
@@ -524,6 +533,16 @@ impl Arena {
         self.store.write_json(&format!("{dir}/rebuttals.json"), &rebuttals)?;
         self.store.write_json(&format!("{dir}/rulings.json"), &rulings)?;
         self.store.write_json(&format!("{dir}/fitness.json"), &fitness)?;
+
+        let missing: Vec<&str> = findings.iter().filter(|f| f.is_canonical())
+            .filter(|f| !rulings.iter().any(|r| r.raw.finding_id == f.id))
+            .map(|f| f.id.as_str()).collect();
+        if !missing.is_empty() {
+            let message = format!("incomplete judgment in generation {}: no ruling for {}",
+                generation + 1, missing.join(", "));
+            self.warn(message.clone()).await;
+            bail!("{message}");
+        }
 
         Ok(GenerationOutcome {
             generation,
@@ -816,9 +835,12 @@ impl Arena {
                     // Adjudication is not ideation: cold by default, nudged only
                     // by the judge's own temperament.
                     let temperature = judge.traits.temperature(0.1);
+                    let wanted = prompts::wants_workspace(&self.cfg, provider.needs_workspace());
+                    let ws = self.workspace(&label, wanted).await;
                     let out = self
-                        .call(&provider, &label, &prompt.system, &prompt.user, temperature, None)
+                        .call(&provider, &label, &prompt.system, &prompt.user, temperature, ws.as_ref())
                         .await;
+                    self.release(ws).await;
 
                     let mut ok = true;
                     let report: JudgeReport = match out.and_then(|t| extract_json(&t)) {
@@ -836,7 +858,7 @@ impl Arena {
                     let valid: std::collections::HashSet<&str> =
                         cases.iter().map(|(f, _)| f.id.as_str()).collect();
                     let mut seen = std::collections::HashSet::new();
-                    let votes: Vec<JudgeVote> = report
+                    let mut votes: Vec<JudgeVote> = report
                         .rulings
                         .into_iter()
                         .filter(|r| valid.contains(r.finding_id.as_str()))
@@ -852,6 +874,18 @@ impl Arena {
                         })
                         .collect();
 
+                    if ok && seen.len() != valid.len() {
+                        ok = false;
+                        let mut missing: Vec<&str> = valid.iter().copied()
+                            .filter(|id| !seen.contains(*id)).collect();
+                        missing.sort_unstable();
+                        let error = format!("incomplete judgment: missing {}", missing.join(", "));
+                        self.warn(format!("{label}: {error}")).await;
+                        (self.report)(Event::AgentFailed { label: label.clone(), error });
+                        // A partial batch is a failed call, not a smaller panel
+                        // selected separately by the judge for each finding.
+                        votes.clear();
+                    }
                     if ok {
                         (self.report)(Event::AgentFinished { label, produced: votes.len() });
                     }
@@ -936,9 +970,13 @@ impl Arena {
         }
         let prompt = prompts::synthesize(pack, &confirmed, self.cfg.synthesis.max_themes);
         let _permit = self.gate.acquire().await.expect("semaphore is never closed");
+        let wanted = prompts::wants_workspace(&self.cfg, self.synth.needs_workspace());
+        let ws = self.workspace("synthesis", wanted).await;
         let text = self
-            .call(&self.synth, "synthesis", &prompt.system, &prompt.user, 0.3, None)
-            .await?;
+            .call(&self.synth, "synthesis", &prompt.system, &prompt.user, 0.3, ws.as_ref())
+            .await;
+        self.release(ws).await;
+        let text = text?;
         let report: SynthesisReport = extract_json(&text)?;
         Ok(report.themes)
     }
@@ -961,7 +999,8 @@ impl Arena {
 
         let req = Request::new(label, system, user)
             .temperature(temperature)
-            .in_workspace(workspace.map(|w| w.path.clone()));
+            .in_workspace(Some(workspace.map(|w| w.path.clone())
+                .unwrap_or_else(|| self.vcs.root().to_path_buf())));
 
         let started = std::time::Instant::now();
         let result = provider.complete(req).await;
@@ -1000,7 +1039,13 @@ impl Arena {
 
     /// Raise a warning: recorded for the report, then shown live.
     async fn warn(&self, message: String) {
-        self.warnings.lock().await.push(message.clone());
+        let mut warnings = self.warnings.lock().await;
+        warnings.push(message.clone());
+        // Failed runs may never reach report.json.
+        if let Err(e) = self.store.write_json("warnings.json", &*warnings) {
+            tracing::warn!("could not persist run warnings: {e}");
+        }
+        drop(warnings);
         (self.report)(Event::Warning { message });
     }
 

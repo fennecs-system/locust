@@ -32,7 +32,7 @@ summary = """
 get() became a writer (hit counting and sliding expiry) but stays outside the
 lock that put() holds, so the lock serialises writers against each other only.
 """
-matches = ["lock"]
+matches = ["get()", "lock"]
 
 [[defect]]
 id = "lfu-not-lru"
@@ -72,7 +72,7 @@ session and drops the resident set below max_entries.
 """
 # Surfaced as an unclassified finding on the first benchmark run: a real defect
 # the case author missed. That is what the triage column is for.
-matches = ["evict"]
+matches = ["put()", "evict", "updat"]
 
 # --------------------------------------------------------------- decoys ----
 #
@@ -91,7 +91,7 @@ len() on a dict is atomic under the GIL, and the comment states callers only
 compare the result against zero, so a stale count cannot change any decision.
 Raising this requires ignoring the stated usage.
 """
-matches = ["size"]
+matches = ["size()", "lock"]
 
 [[defect]]
 id = "purge-mutation-during-iteration"
@@ -108,4 +108,4 @@ The comprehension iterates list(self._entries.items()), which is a snapshot
 taken before any mutation. The deletions happen afterwards over that list, and
 pop(k, None) tolerates a key another thread already removed.
 """
-matches = ["purge_expired"]
+matches = ["purge_expired()", "dictionary changed size"]

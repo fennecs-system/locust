@@ -250,6 +250,12 @@ read them. Declaring even one `[[persona]]` of a role in `locust.toml` replaces
 the built-in library for that role, which is the point: your team's review
 standards live in version control, next to the code they apply to.
 
+Defenders currently render traits in the reviewer's voice. The `skeptic` preset
+therefore includes “Be hostile to this code.” For experiments with skepticism
+toward findings, use neutral traits and an explicit defender prompt asking for
+evidence against each claim while conceding true defects. Compare responses to
+the same fixed true and false claims; pushback alone does not measure accuracy.
+
 ```toml
 [[persona]]
 role = "attacker"
@@ -332,6 +338,9 @@ pays `duplicate` — less than finding it first. Independently making the same
 it first. Without that second half, echoing another reviewer's noise is free
 while originating it is punished, and the cheapest strategy becomes agreeing
 with whoever spoke first.
+
+A confirmed finding marked stale earns only `stale_penalty`, capped at zero,
+including its duplicates. Severity, altitude and corroboration add no reward.
 
 All of it is in `[scoring]`. The two values worth thinking about before you
 change them are `refuted`, which must stay negative, and `stale_penalty`, which

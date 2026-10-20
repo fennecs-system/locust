@@ -327,8 +327,8 @@ pub struct ScoringConfig {
     pub duplicate: f64,
     /// Added per extra provider that independently raised the same cluster.
     pub corroboration_bonus: f64,
-    /// Applied when the judge marks a finding as a restatement of something
-    /// already settled in an earlier generation.
+    /// Replaces positive rewards (including duplicate and corroboration credit)
+    /// for confirmed restatements of settled findings. Capped at zero.
     pub stale_penalty: f64,
     /// Scale confirmed findings by the judge's severity rating.
     pub severity_weighted: bool,
