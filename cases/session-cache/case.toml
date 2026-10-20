@@ -57,7 +57,13 @@ summary = """
 put() unconditionally sets _hits[key] = 0, so refreshing the hottest session
 demotes it to the strict minimum and the next put() evicts it.
 """
-matches = ["_hits", "0"]
+# `"0"` alone collided: it is one character, so every finding mentioning
+# `_hits` also matched this entry, and the ambiguity rule then left the
+# genuine `hits-entries-desync` report unclassified and reported as missed.
+# The literal assignment names this defect and nothing else. A report that
+# describes it without quoting the line lands in triage, which is the right
+# place for a call this close to another entry.
+matches = ["_hits[key] = 0"]
 
 [[defect]]
 id = "put-evicts-on-update"

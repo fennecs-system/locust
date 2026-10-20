@@ -573,6 +573,45 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// From a live benchmark run: the arena reported
+    /// "Expiry in get() leaves an orphan _hits key; eviction then KeyErrors
+    /// forever" — which is `hits-entries-desync` — and the scorecard listed
+    /// that defect as missed.
+    ///
+    /// The cause was a one-character keyword on a neighbouring entry: the
+    /// failure scenario happens to say "hits=0", which satisfied
+    /// `["_hits", "0"]`, so two entries matched and the ambiguity rule
+    /// discarded a correct identification. Leaving genuinely ambiguous
+    /// matches for triage is right; a keyword broad enough to manufacture the
+    /// ambiguity is not, and the cost is a benchmark that under-reports
+    /// recall and names the wrong defect as missed.
+    #[test]
+    fn a_found_defect_is_not_reported_as_missed_through_a_broad_neighbour() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cases/session-cache");
+        if !root.exists() {
+            return;
+        }
+        let case = Case::load(&root).expect("case loads");
+
+        // Verbatim from the run that exposed this, including the "hits=0"
+        // that caused the collision.
+        let mut reported = finding(
+            "src/cache.py",
+            Some(21),
+            "Expiry in get() leaves an orphan _hits key; eviction then KeyErrors forever",
+            "When get() finds an expired entry it deletes `self._entries[key]` but leaves              `self._hits[key]`. _evict() picks its victim from `_hits` and runs              `del self._entries[coldest]` first, so it can raise KeyError.",
+        );
+        reported.raw.failure_scenario =
+            "Session K is put (hits=0) and expires, then a request calls get(K): line 21              deletes _entries[K], but _hits[K]=0 stays."
+                .into();
+
+        assert_eq!(
+            classify(&reported, &case.manifest.defects),
+            Classified::Real { defect: "hits-entries-desync".into() },
+        );
+    }
+
     #[test]
     fn scores_are_zero_safe_and_read_the_right_way_round() {
         let card = Scorecard {
