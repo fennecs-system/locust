@@ -1,0 +1,111 @@
+name = "session-cache"
+language = "python"
+description = "Adds LRU eviction, sliding expiry and a lock to an in-memory session store."
+
+notes = """
+This is a session store for a web service. Sessions are written on login and
+read on every authenticated request, so reads vastly outnumber writes and the
+store is shared across request threads.
+"""
+
+# ---------------------------------------------------------------- real -----
+
+[[defect]]
+id = "hits-entries-desync"
+kind = "real"
+file = "src/cache.py"
+lines = [20, 40]
+severity = "high"
+summary = """
+The lazy-expiry branch in get() deletes from _entries but leaves _hits, so
+_evict() can select a key absent from _entries and raise KeyError out of put().
+"""
+matches = ["_hits", "KeyError"]
+
+[[defect]]
+id = "unlocked-read-write"
+kind = "real"
+file = "src/cache.py"
+lines = [15, 30]
+severity = "high"
+summary = """
+get() became a writer (hit counting and sliding expiry) but stays outside the
+lock that put() holds, so the lock serialises writers against each other only.
+"""
+matches = ["lock"]
+
+[[defect]]
+id = "lfu-not-lru"
+kind = "real"
+file = "src/cache.py"
+lines = [6, 45]
+severity = "medium"
+summary = """
+The docstring promises LRU, but _hits is a non-decaying lifetime counter and
+_evict minimises over it. That is LFU without decay; it will evict an entry read
+one second ago in favour of one untouched for hours.
+"""
+matches = ["lru"]
+
+[[defect]]
+id = "put-resets-hit-count"
+kind = "real"
+file = "src/cache.py"
+lines = [31, 40]
+severity = "medium"
+summary = """
+put() unconditionally sets _hits[key] = 0, so refreshing the hottest session
+demotes it to the strict minimum and the next put() evicts it.
+"""
+matches = ["_hits", "0"]
+
+[[defect]]
+id = "put-evicts-on-update"
+kind = "real"
+file = "src/cache.py"
+lines = [28, 36]
+severity = "medium"
+summary = """
+put() runs the capacity check before determining whether the key already
+exists, so overwriting a resident session at capacity evicts an unrelated live
+session and drops the resident set below max_entries.
+"""
+# Surfaced as an unclassified finding on the first benchmark run: a real defect
+# the case author missed. That is what the triage column is for.
+matches = ["evict"]
+
+# --------------------------------------------------------------- decoys ----
+#
+# Written to look wrong. An attacker should raise these; a defender that is
+# paying attention refutes them. A confirmed decoy means nobody checked.
+
+[[defect]]
+id = "size-race"
+kind = "decoy"
+file = "src/cache.py"
+lines = [42, 46]
+severity = "low"
+summary = "size() reads len(self._entries) without the lock, which looks like a data race."
+why_safe = """
+len() on a dict is atomic under the GIL, and the comment states callers only
+compare the result against zero, so a stale count cannot change any decision.
+Raising this requires ignoring the stated usage.
+"""
+matches = ["size"]
+
+[[defect]]
+id = "purge-mutation-during-iteration"
+kind = "decoy"
+file = "src/cache.py"
+lines = [47, 55]
+severity = "medium"
+summary = """
+purge_expired() appears to mutate _entries while iterating it, the classic
+RuntimeError: dictionary changed size during iteration.
+"""
+why_safe = """
+The comprehension iterates list(self._entries.items()), which is a snapshot
+taken before any mutation. The deletions happen afterwards over that list, and
+pop(k, None) tolerates a key another thread already removed.
+"""
+matches = ["purge_expired"]

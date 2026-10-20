@@ -107,6 +107,31 @@ enum Command {
         render: bool,
     },
 
+    /// Run the arena against cases with known answers.
+    ///
+    /// Without ground truth a run that confirms everything is unreadable: it
+    /// might mean the reviewers are excellent, or that nobody pushed back.
+    Bench {
+        /// Only this case.
+        #[arg(long)]
+        case: Option<String>,
+        /// Where the cases live.
+        #[arg(long, default_value = "cases")]
+        cases_dir: PathBuf,
+        /// Generations per case.
+        #[arg(long, short, default_value_t = 1)]
+        generations: u32,
+        /// Reviewers per generation.
+        #[arg(long)]
+        attackers: Option<usize>,
+        /// Emit the scorecards as JSON.
+        #[arg(long)]
+        json: bool,
+        /// List the cases and what they plant, without running anything.
+        #[arg(long)]
+        list: bool,
+    },
+
     /// Remove agent worktrees left behind by an interrupted run.
     Clean,
 }
@@ -158,6 +183,12 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Init { force } => init::write_config(&repo, force),
+
+        Command::Bench { case, cases_dir, generations, attackers, json, list } => {
+            let cfg = load_config(&cli.config, &repo)?;
+            bench(&cfg, &cases_dir, case.as_deref(), generations, attackers, json, list, cli.verbose)
+                .await
+        }
 
         Command::Clean => {
             let vcs = locust_vcs::detect(&repo, None)?;
@@ -252,6 +283,159 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bench(
+    cfg: &Config,
+    cases_dir: &std::path::Path,
+    only: Option<&str>,
+    generations: u32,
+    attackers: Option<usize>,
+    json: bool,
+    list_only: bool,
+    verbose: bool,
+) -> Result<()> {
+    use locust_core::bench::{Case, Scorecard};
+
+    let cases: Vec<Case> = Case::discover(cases_dir)?
+        .into_iter()
+        .filter(|c| only.is_none_or(|n| c.manifest.name == n))
+        .collect();
+    if cases.is_empty() {
+        bail!("no cases found in {}", cases_dir.display());
+    }
+
+    if list_only {
+        for c in &cases {
+            println!(
+                "\n{} {}",
+                term::bold(&c.manifest.name),
+                term::dim(&c.manifest.description)
+            );
+            for d in &c.manifest.defects {
+                let tag = match d.kind {
+                    locust_core::bench::DefectKind::Real => term::red("real "),
+                    locust_core::bench::DefectKind::Decoy => term::cyan("decoy"),
+                };
+                // One line each: summaries are paragraphs in the manifest.
+                let gist = d.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+                let gist: String = gist.chars().take(88).collect();
+                println!("  {tag} {:<30} {}", d.id, term::dim(&gist));
+            }
+        }
+        return Ok(());
+    }
+
+    // Cases are built outside the repository under review so the arena never
+    // sees locust's own source instead of the case's.
+    let workdir = std::env::temp_dir().join(format!("locust-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&workdir)?;
+
+    let mut cards = Vec::new();
+    for case in &cases {
+        eprintln!("\n{} {}", term::bold("case"), case.manifest.name);
+        let repo = case.materialise(&workdir)?;
+
+        let mut cfg = cfg.clone();
+        cfg.run.base = "main".into();
+        cfg.run.target = "change".into();
+        cfg.run.generations = generations;
+        if let Some(a) = attackers {
+            cfg.arena.attackers = a;
+        }
+        // The case's own notes replace the host project's.
+        cfg.context.notes = case.manifest.notes.clone();
+        cfg.validate()?;
+
+        let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+        let arena = Arena::new(cfg, vcs, term::reporter(verbose))?;
+        match arena.run().await {
+            Ok(outcome) => cards.push(Scorecard::build(case, &outcome)),
+            Err(e) => {
+                eprintln!("  {} {e:#}", term::red("failed"));
+                cards.push(Scorecard { case: case.manifest.name.clone(), ..Default::default() });
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cards)?);
+        return Ok(());
+    }
+
+    println!("\n{}", term::bold("benchmark"));
+    println!(
+        "\n{:<18} {:>8} {:>10} {:>10} {:>8} {:>8}",
+        "case", "recall", "decoys", "pushback", "conf", "cost"
+    );
+    println!("{}", "-".repeat(66));
+    for c in &cards {
+        println!(
+            "{:<18} {:>7.0}% {:>9} {:>9.0}% {:>8} {:>8}",
+            c.case,
+            c.recall() * 100.0,
+            match c.decoy_resistance() {
+                Some(_) => format!("{}/{}", c.decoys_caught.len(), c.decoys_caught.len() + c.decoys_confirmed.len()),
+                None => "untested".into(),
+            },
+            c.defence_pushback() * 100.0,
+            c.findings_confirmed,
+            if c.cost_usd > 0.0 { format!("${:.2}", c.cost_usd) } else { "—".into() },
+        );
+    }
+
+    for c in &cards {
+        println!("\n{} {}", term::bold(&c.case), term::dim("detail"));
+        if !c.real_missed.is_empty() {
+            println!("  {} {}", term::red("missed"), c.real_missed.join(", "));
+        }
+        if !c.decoys_confirmed.is_empty() {
+            println!(
+                "  {} {} {}",
+                term::red("confirmed decoy"),
+                c.decoys_confirmed.join(", "),
+                term::dim("(the defence let a non-defect through)")
+            );
+        }
+        if c.decoys_untested() > 0 {
+            println!(
+                "  {} {} decoy(s) no reviewer raised {}",
+                term::yellow("untested"),
+                c.decoys_untested(),
+                term::dim("(they measure nothing; make them more tempting)")
+            );
+        }
+        if !c.decoys_caught.is_empty() {
+            println!(
+                "  {} {} {}",
+                term::green("caught decoy"),
+                c.decoys_caught.join(", "),
+                term::dim("(raised, then correctly not confirmed)")
+            );
+        }
+        println!(
+            "  {:<16} refute {}, narrow {}, concede {} of {}",
+            term::dim("defence"),
+            c.refuted_stance,
+            c.narrowed_stance,
+            c.conceded_stance,
+            c.rebuttals
+        );
+        for u in &c.unclassified {
+            println!("  {} {u}", term::yellow("triage"));
+        }
+    }
+
+    println!(
+        "\n{}",
+        term::dim(
+            "recall: planted defects confirmed. decoys: non-defects correctly not confirmed. \
+             pushback: rebuttals that refuted or narrowed. triage: confirmed findings matching \
+             nothing planted — often real, and worth adding to the case."
+        )
+    );
+    Ok(())
 }
 
 fn load_config(explicit: &Option<PathBuf>, repo: &std::path::Path) -> Result<Config> {

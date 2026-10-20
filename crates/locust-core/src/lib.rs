@@ -18,6 +18,7 @@
 //! into root-cause themes.
 
 pub mod arena;
+pub mod bench;
 pub mod config;
 pub mod context;
 pub mod dedup;

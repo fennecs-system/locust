@@ -1,0 +1,584 @@
+//! Ground truth for the arena.
+//!
+//! Without it, the arena's output cannot be read. A run that confirms
+//! everything might mean the reviewers are excellent, or that the defence is
+//! unmotivated and the panel rubber-stamps — those look identical from the
+//! outside, and no amount of staring at a report distinguishes them.
+//!
+//! A case is a change with a known answer. It plants two kinds of thing:
+//!
+//! * **real** defects, which a working arena should confirm. Missing one is a
+//!   false negative, and the recall figure is the headline.
+//! * **decoys** — code written to *look* defective and not be. A guard that
+//!   appears missing but is enforced by the caller; an unbounded-looking loop
+//!   bounded by a type. These are the ones that measure the defence. An
+//!   attacker will raise them; a defender that is paying attention refutes
+//!   them, and a confirmed decoy means nobody did.
+//!
+//! Findings matching neither are reported as **unclassified** rather than
+//! counted against the run. An unanticipated finding is often a real defect
+//! the case author missed, and scoring it as a false positive would train the
+//! benchmark to reward blandness.
+
+use crate::model::{Finding, Ruling, Severity, Stance, Verdict};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// How far from a declared line a finding may sit and still be the same thing.
+/// Generous: reviewers cite the symptom where the case author cited the cause.
+const LINE_SLACK: u32 = 25;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefectKind {
+    /// A genuine defect. The arena should confirm it.
+    Real,
+    /// Written to look like a defect. The arena should refute it, and a
+    /// defender that concedes it is not doing its job.
+    Decoy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Defect {
+    pub id: String,
+    pub kind: DefectKind,
+    pub file: String,
+    /// Inclusive line range the defect lives in, if it has one.
+    #[serde(default)]
+    pub lines: Option<[u32; 2]>,
+    #[serde(default)]
+    pub severity: Severity,
+    /// What it is, for the report. Not used for matching.
+    pub summary: String,
+    /// Every one of these must appear in the finding's text. Location alone is
+    /// too weak: planted defects cluster in the same few functions, so without
+    /// this a finding about one would be credited to its neighbour.
+    pub matches: Vec<String>,
+    /// Why this is not a defect. Required for decoys, so a case cannot claim
+    /// one without saying what makes it safe.
+    #[serde(default)]
+    pub why_safe: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaseManifest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(rename = "defect")]
+    pub defects: Vec<Defect>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Case {
+    pub manifest: CaseManifest,
+    pub dir: PathBuf,
+}
+
+impl Case {
+    pub fn load(dir: &Path) -> Result<Self> {
+        let path = dir.join("case.toml");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let manifest: CaseManifest =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+
+        if !dir.join("base").is_dir() || !dir.join("head").is_dir() {
+            bail!("case `{}` needs both a base/ and a head/ tree", manifest.name);
+        }
+        for d in &manifest.defects {
+            if d.matches.is_empty() {
+                bail!("defect `{}` has no `matches`; it could never be credited", d.id);
+            }
+            if d.kind == DefectKind::Decoy && d.why_safe.trim().is_empty() {
+                bail!("decoy `{}` must say `why_safe`", d.id);
+            }
+        }
+        Ok(Self { manifest, dir: dir.to_path_buf() })
+    }
+
+    /// Every case directory under `root`, in a stable order.
+    pub fn discover(root: &Path) -> Result<Vec<Case>> {
+        let mut cases = Vec::new();
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(root)
+            .with_context(|| format!("reading cases from {}", root.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("case.toml").is_file())
+            .collect();
+        entries.sort();
+        for dir in entries {
+            cases.push(Case::load(&dir)?);
+        }
+        Ok(cases)
+    }
+
+    pub fn real(&self) -> impl Iterator<Item = &Defect> {
+        self.manifest.defects.iter().filter(|d| d.kind == DefectKind::Real)
+    }
+
+    pub fn decoys(&self) -> impl Iterator<Item = &Defect> {
+        self.manifest.defects.iter().filter(|d| d.kind == DefectKind::Decoy)
+    }
+
+    /// Build the case into a throwaway git repository: `base/` as the first
+    /// commit on `main`, `head/` as a second commit on a branch, so the arena
+    /// reviews exactly the difference between them.
+    pub fn materialise(&self, into: &Path) -> Result<PathBuf> {
+        let repo = into.join(&self.manifest.name);
+        if repo.exists() {
+            std::fs::remove_dir_all(&repo)?;
+        }
+        std::fs::create_dir_all(&repo)?;
+
+        let git = |args: &[&str]| -> Result<()> {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .context("running git")?;
+            if !out.status.success() {
+                bail!("git {:?}: {}", args, String::from_utf8_lossy(&out.stderr).trim());
+            }
+            Ok(())
+        };
+
+        git(&["init", "-q", "--initial-branch=main"])?;
+        git(&["config", "user.email", "bench@locust.test"])?;
+        git(&["config", "user.name", "locust bench"])?;
+
+        copy_tree(&self.dir.join("base"), &repo)?;
+        git(&["add", "-A"])?;
+        git(&["commit", "-qm", "base"])?;
+
+        git(&["checkout", "-q", "-b", "change"])?;
+        // Remove the tracked tree first so a file deleted by the change is
+        // actually deleted, rather than lingering from base.
+        for entry in std::fs::read_dir(&repo)?.flatten() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let p = entry.path();
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)?;
+            } else {
+                std::fs::remove_file(p)?;
+            }
+        }
+        copy_tree(&self.dir.join("head"), &repo)?;
+        git(&["add", "-A"])?;
+        git(&["commit", "-qm", "change under review"])?;
+
+        Ok(repo)
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// What a confirmed finding turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Classified {
+    /// Matched a planted defect.
+    Real { defect: String },
+    /// Matched something planted to look like a defect and is not.
+    Decoy { defect: String },
+    /// Matched nothing in the manifest. Possibly a real defect the case
+    /// author missed, so it is reported for triage rather than scored.
+    Unclassified,
+}
+
+/// Decide what a finding refers to.
+///
+/// Both the location and the keywords have to agree. Location alone credits a
+/// finding to its neighbour, since planted defects cluster; keywords alone
+/// credit a finding in an unrelated file that happens to use the same words.
+pub fn classify(finding: &Finding, defects: &[Defect]) -> Classified {
+    let haystack = format!(
+        "{} {} {} {}",
+        finding.raw.title, finding.raw.claim, finding.raw.failure_scenario, finding.raw.evidence
+    )
+    .to_lowercase();
+
+    for defect in defects {
+        if normalize(&defect.file) != normalize(&finding.raw.file) {
+            continue;
+        }
+        if let (Some([lo, hi]), Some(line)) = (defect.lines, finding.raw.line) {
+            let within = line + LINE_SLACK >= lo && line <= hi + LINE_SLACK;
+            if !within {
+                continue;
+            }
+        }
+        if !defect.matches.iter().all(|m| haystack.contains(&m.to_lowercase())) {
+            continue;
+        }
+        return match defect.kind {
+            DefectKind::Real => Classified::Real { defect: defect.id.clone() },
+            DefectKind::Decoy => Classified::Decoy { defect: defect.id.clone() },
+        };
+    }
+    Classified::Unclassified
+}
+
+fn normalize(path: &str) -> String {
+    path.trim().trim_start_matches("./").trim_start_matches('/').to_lowercase()
+}
+
+/// How one case went.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Scorecard {
+    pub case: String,
+    pub real_planted: usize,
+    /// Planted defects a confirmed finding matched.
+    pub real_found: Vec<String>,
+    pub real_missed: Vec<String>,
+    pub decoys_planted: usize,
+    /// Decoys the arena confirmed. Every one is a failure of the defence.
+    pub decoys_confirmed: Vec<String>,
+    /// Decoys an attacker raised and the arena correctly did not confirm.
+    pub decoys_caught: Vec<String>,
+    /// Confirmed findings matching nothing planted; need a human to triage.
+    pub unclassified: Vec<String>,
+
+    // --- what the defence actually did ---
+    pub rebuttals: usize,
+    pub refuted_stance: usize,
+    pub narrowed_stance: usize,
+    pub conceded_stance: usize,
+
+    pub findings_raised: usize,
+    pub findings_confirmed: usize,
+    pub findings_refuted: usize,
+    pub elapsed_secs: f64,
+    pub cost_usd: f64,
+}
+
+impl Scorecard {
+    /// Share of planted defects the arena confirmed.
+    pub fn recall(&self) -> f64 {
+        ratio(self.real_found.len(), self.real_planted)
+    }
+
+    /// Share of *raised* decoys the arena refused to confirm, or `None` when
+    /// no attacker raised one.
+    ///
+    /// Counted over raised decoys rather than planted ones on purpose. A decoy
+    /// nobody mentions has not been resisted, it has not been tested, and
+    /// scoring it as a pass reports a defence that was never asked to do
+    /// anything as a defence that works. When this returns `None` the case
+    /// needs more tempting decoys, not a better defence.
+    pub fn decoy_resistance(&self) -> Option<f64> {
+        let tested = self.decoys_caught.len() + self.decoys_confirmed.len();
+        if tested == 0 {
+            None
+        } else {
+            Some(ratio(self.decoys_caught.len(), tested))
+        }
+    }
+
+    /// Decoys no reviewer raised. These measure nothing.
+    pub fn decoys_untested(&self) -> usize {
+        self.decoys_planted
+            .saturating_sub(self.decoys_caught.len() + self.decoys_confirmed.len())
+    }
+
+    /// Share of rebuttals that pushed back at all, rather than conceding.
+    pub fn defence_pushback(&self) -> f64 {
+        ratio(self.refuted_stance + self.narrowed_stance, self.rebuttals)
+    }
+
+    pub fn build(case: &Case, outcome: &crate::model::RunOutcome) -> Self {
+        let mut card = Scorecard {
+            case: case.manifest.name.clone(),
+            real_planted: case.real().count(),
+            decoys_planted: case.decoys().count(),
+            elapsed_secs: outcome.elapsed_secs,
+            cost_usd: outcome.usage.cost_usd,
+            ..Default::default()
+        };
+
+        for gen in &outcome.generations {
+            card.findings_raised += gen.findings.len();
+            for r in &gen.rulings {
+                match r.raw.verdict {
+                    Verdict::Confirmed => card.findings_confirmed += 1,
+                    Verdict::Refuted => card.findings_refuted += 1,
+                    Verdict::Undecided => {}
+                }
+            }
+            for r in &gen.rebuttals {
+                card.rebuttals += 1;
+                match r.raw.stance {
+                    Stance::Refute => card.refuted_stance += 1,
+                    Stance::Narrow => card.narrowed_stance += 1,
+                    Stance::Concede => card.conceded_stance += 1,
+                }
+            }
+        }
+
+        for (finding, _) in outcome.confirmed_findings() {
+            match classify(finding, &case.manifest.defects) {
+                Classified::Real { defect } => {
+                    if !card.real_found.contains(&defect) {
+                        card.real_found.push(defect);
+                    }
+                }
+                Classified::Decoy { defect } => {
+                    if !card.decoys_confirmed.contains(&defect) {
+                        card.decoys_confirmed.push(defect);
+                    }
+                }
+                Classified::Unclassified => {
+                    card.unclassified.push(format!(
+                        "{} — {}",
+                        finding.location(),
+                        finding.raw.title
+                    ));
+                }
+            }
+        }
+
+        // A decoy counts as caught when some reviewer raised it and the arena
+        // did not confirm it. A decoy nobody noticed proves nothing about the
+        // defence, so it is neither credited nor held against it.
+        let raised_decoys: Vec<String> = outcome
+            .generations
+            .iter()
+            .flat_map(|g| g.findings.iter())
+            .filter_map(|f| match classify(f, &case.manifest.defects) {
+                Classified::Decoy { defect } => Some(defect),
+                _ => None,
+            })
+            .collect();
+        for id in raised_decoys {
+            if !card.decoys_confirmed.contains(&id) && !card.decoys_caught.contains(&id) {
+                card.decoys_caught.push(id);
+            }
+        }
+
+        card.real_missed = case
+            .real()
+            .map(|d| d.id.clone())
+            .filter(|id| !card.real_found.contains(id))
+            .collect();
+        card
+    }
+}
+
+fn ratio(n: usize, d: usize) -> f64 {
+    if d == 0 {
+        0.0
+    } else {
+        n as f64 / d as f64
+    }
+}
+
+/// Unused today, but the signature the scorer needs if rulings are ever scored
+/// per-defect rather than per-finding.
+pub fn verdict_of<'a>(rulings: &'a [Ruling], finding: &Finding) -> Option<&'a Ruling> {
+    rulings.iter().find(|r| r.raw.finding_id == finding.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Grounding, RawFinding};
+
+    fn defect(id: &str, kind: DefectKind, file: &str, lines: Option<[u32; 2]>, matches: &[&str]) -> Defect {
+        Defect {
+            id: id.into(),
+            kind,
+            file: file.into(),
+            lines,
+            severity: Severity::High,
+            summary: "s".into(),
+            matches: matches.iter().map(|m| m.to_string()).collect(),
+            why_safe: if kind == DefectKind::Decoy { "guarded by caller".into() } else { String::new() },
+        }
+    }
+
+    fn finding(file: &str, line: Option<u32>, title: &str, claim: &str) -> Finding {
+        Finding {
+            id: "f1".into(),
+            generation: 0,
+            persona: "p".into(),
+            persona_id: "p".into(),
+            provider: "x".into(),
+            raw: RawFinding {
+                file: file.into(),
+                line,
+                category: String::new(),
+                title: title.into(),
+                claim: claim.into(),
+                failure_scenario: String::new(),
+                evidence: String::new(),
+                severity: Severity::High,
+                altitude: Default::default(),
+                confidence: 0.9,
+            },
+            cluster: "f1".into(),
+            duplicate_of: None,
+            corroboration: 1,
+            grounding: Grounding::Verified,
+        }
+    }
+
+    #[test]
+    fn a_finding_matching_location_and_keywords_is_credited() {
+        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
+        let f = finding("src/cache.py", Some(22), "expiry leaves _hits populated", "_evict then raises KeyError");
+        assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
+    }
+
+    #[test]
+    fn location_alone_does_not_credit_a_neighbouring_defect() {
+        // Planted defects cluster in the same function; without the keyword
+        // requirement each would be credited for the other's discovery.
+        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
+        let f = finding("src/cache.py", Some(24), "get() mutates shared state without the lock", "a race");
+        assert_eq!(classify(&f, &defects), Classified::Unclassified);
+    }
+
+    #[test]
+    fn keywords_alone_do_not_credit_a_finding_in_another_file() {
+        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits"])];
+        let f = finding("src/other.py", Some(22), "_hits is never pruned", "leak");
+        assert_eq!(classify(&f, &defects), Classified::Unclassified);
+    }
+
+    #[test]
+    fn a_reviewer_citing_the_symptom_rather_than_the_cause_still_matches() {
+        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 20]), &["_hits"])];
+        // 40 lines away is the same defect seen from `_evict`; slack covers it.
+        let f = finding("src/cache.py", Some(38), "_hits and _entries disagree", "boom");
+        assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
+        // 300 lines away is a different part of the file.
+        let far = finding("src/cache.py", Some(300), "_hits and _entries disagree", "boom");
+        assert_eq!(classify(&far, &defects), Classified::Unclassified);
+    }
+
+    #[test]
+    fn confirming_a_decoy_is_recorded_as_such() {
+        let defects = vec![defect("safe-ttl", DefectKind::Decoy, "src/cache.py", None, &["ttl"])];
+        let f = finding("src/cache.py", Some(9), "ttl default changed", "breaks callers");
+        assert_eq!(classify(&f, &defects), Classified::Decoy { defect: "safe-ttl".into() });
+    }
+
+    #[test]
+    fn a_defect_with_no_line_range_matches_anywhere_in_its_file() {
+        let defects = vec![defect("anywhere", DefectKind::Real, "a.rs", None, &["widget"])];
+        let f = finding("a.rs", Some(9999), "widget is wrong", "x");
+        assert_eq!(classify(&f, &defects), Classified::Real { defect: "anywhere".into() });
+    }
+
+    #[test]
+    fn paths_are_compared_leniently() {
+        let defects = vec![defect("d", DefectKind::Real, "src/cache.py", None, &["x"])];
+        let f = finding("./src/cache.py", None, "x happens", "x");
+        assert_eq!(classify(&f, &defects), Classified::Real { defect: "d".into() });
+    }
+
+    /// The case has to become a repository whose diff is exactly the change,
+    /// or the arena reviews the wrong thing and every score is meaningless.
+    #[test]
+    fn a_case_materialises_into_a_repo_whose_diff_is_the_change() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cases/session-cache");
+        if !root.exists() {
+            return; // cases are optional for a library consumer
+        }
+        let case = Case::load(&root).expect("case loads");
+        let tmp = std::env::temp_dir().join(format!("locust-bench-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let repo = case.materialise(&tmp).expect("materialises");
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        // Two commits, and the branch the config reviews actually exists.
+        assert_eq!(git(&["rev-list", "--count", "HEAD"]).trim(), "2");
+        assert!(git(&["branch"]).contains("change"));
+
+        let diff = git(&["diff", "main...change"]);
+        assert!(diff.contains("max_entries"), "the change is in the diff");
+        assert!(diff.contains("_hits"), "and so is the planted defect");
+        // api.py is identical in both trees, so it must not appear.
+        assert!(!diff.contains("api.py"), "unchanged files must not be in the diff");
+
+        // Every file a defect names has to exist at the reviewed revision,
+        // otherwise the citation check would reject correct findings.
+        for d in &case.manifest.defects {
+            let shown = git(&["show", &format!("change:{}", d.file)]);
+            assert!(!shown.is_empty(), "defect `{}` names a missing file {}", d.id, d.file);
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn scores_are_zero_safe_and_read_the_right_way_round() {
+        let card = Scorecard {
+            real_planted: 4,
+            real_found: vec!["a".into(), "b".into()],
+            decoys_planted: 2,
+            decoys_confirmed: vec!["d1".into()],
+            rebuttals: 10,
+            refuted_stance: 2,
+            narrowed_stance: 1,
+            conceded_stance: 7,
+            ..Default::default()
+        };
+        assert!((card.recall() - 0.5).abs() < 1e-9);
+        assert!((card.defence_pushback() - 0.3).abs() < 1e-9);
+
+        // An empty case must not divide by zero or claim a perfect score it
+        // did not earn.
+        let empty = Scorecard::default();
+        assert_eq!(empty.recall(), 0.0);
+        assert_eq!(empty.defence_pushback(), 0.0);
+    }
+
+    /// Observed on the first benchmark run: two decoys were planted, neither
+    /// was raised by any reviewer, and the scorecard reported 2/2 resisted --
+    /// crediting the defence for work it was never asked to do.
+    #[test]
+    fn a_decoy_nobody_raised_is_untested_not_resisted() {
+        let untouched = Scorecard { decoys_planted: 2, ..Default::default() };
+        assert_eq!(untouched.decoy_resistance(), None, "no evidence is not a pass");
+        assert_eq!(untouched.decoys_untested(), 2);
+
+        let tested = Scorecard {
+            decoys_planted: 2,
+            decoys_caught: vec!["a".into()],
+            decoys_confirmed: vec!["b".into()],
+            ..Default::default()
+        };
+        assert_eq!(tested.decoy_resistance(), Some(0.5));
+        assert_eq!(tested.decoys_untested(), 0);
+    }
+}
