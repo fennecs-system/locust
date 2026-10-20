@@ -206,6 +206,30 @@ pub enum Classified {
     Unclassified,
 }
 
+/// What a canonical finding's duplicates agree it is, when they are unanimous.
+///
+/// Returns `None` unless at least one duplicate could be placed and every
+/// duplicate that could be placed names the same defect. Disagreement means
+/// the cluster is genuinely mixed, which is a triage question, not a credit.
+fn cluster_consensus(
+    canonical: &Finding,
+    all: &[&Finding],
+    defects: &[Defect],
+) -> Option<Classified> {
+    let mut agreed: Option<Classified> = None;
+    for sibling in all.iter().filter(|f| f.duplicate_of.as_deref() == Some(&canonical.id)) {
+        match classify(sibling, defects) {
+            Classified::Unclassified => continue,
+            placed => match &agreed {
+                None => agreed = Some(placed),
+                Some(existing) if *existing == placed => {}
+                Some(_) => return None,
+            },
+        }
+    }
+    agreed
+}
+
 /// Decide what a finding refers to.
 ///
 /// Both the location and the keywords have to agree. Location alone credits a
@@ -339,8 +363,29 @@ impl Scorecard {
             }
         }
 
+        // Every finding raised, so a cluster's duplicates can speak for a
+        // canonical member the manifest cannot place.
+        let all_findings: Vec<&Finding> =
+            outcome.generations.iter().flat_map(|g| g.findings.iter()).collect();
+
         for (finding, _) in outcome.confirmed_findings() {
-            match classify(finding, &case.manifest.defects) {
+            let mut verdict = classify(finding, &case.manifest.defects);
+
+            // A thorough finding names several mechanisms, so it matches
+            // several entries and the ambiguity rule discards it — while the
+            // narrower duplicates clustered beneath it each name one defect
+            // unambiguously. Consulting them recovers an identification the
+            // run already made, rather than inventing one: it is used only
+            // when the canonical member is unplaceable and the duplicates
+            // agree on exactly one defect.
+            if verdict == Classified::Unclassified {
+                if let Some(agreed) = cluster_consensus(finding, &all_findings, &case.manifest.defects)
+                {
+                    verdict = agreed;
+                }
+            }
+
+            match verdict {
                 Classified::Real { defect } => {
                     if !card.real_found.contains(&defect) {
                         card.real_found.push(defect);
@@ -627,6 +672,61 @@ mod tests {
             classify(&reported, &case.manifest.defects),
             Classified::Real { defect: "hits-entries-desync".into() },
         );
+    }
+
+    /// From the second live run: three reviewers independently reported
+    /// `hits-entries-desync`, the arena confirmed it, and the scorecard listed
+    /// it as missed.
+    ///
+    /// Clustering had made the most thorough report canonical. That report
+    /// names both the orphaned hit count and the missing lock, so it matched
+    /// two manifest entries and the ambiguity rule discarded it — while the
+    /// narrower duplicates beneath it each named one defect cleanly and were
+    /// never consulted, because only canonical findings are classified.
+    ///
+    /// Penalising a reviewer for thoroughness is exactly backwards.
+    #[test]
+    fn a_cluster_speaks_for_a_canonical_finding_the_manifest_cannot_place() {
+        let ambiguous = Defect {
+            id: "ambiguous-neighbour".into(),
+            kind: DefectKind::Real,
+            file: "src/cache.py".into(),
+            lines: None,
+            severity: Severity::High,
+            summary: "s".into(),
+            matches: vec!["lock".into()],
+            why_safe: String::new(),
+        };
+        let desync = defect("desync", DefectKind::Real, "src/cache.py", None, &["_hits", "KeyError"]);
+        let defects = vec![desync, ambiguous];
+
+        // Thorough: names the orphan *and* the lock, so it matches both.
+        let mut canonical = finding(
+            "src/cache.py",
+            Some(21),
+            "expiry leaves _hits and the lock does not cover get()",
+            "_evict then raises KeyError",
+        );
+        canonical.id = "f0-0-1".into();
+        assert_eq!(classify(&canonical, &defects), Classified::Unclassified);
+
+        // Narrow duplicates beneath it, each placeable.
+        let mut dup = finding("src/cache.py", Some(20), "stale _hits key", "later puts raise KeyError");
+        dup.id = "f0-2-0".into();
+        dup.duplicate_of = Some("f0-0-1".into());
+
+        let all = vec![&canonical, &dup];
+        assert_eq!(
+            cluster_consensus(&canonical, &all, &defects),
+            Some(Classified::Real { defect: "desync".into() }),
+        );
+
+        // A mixed cluster stays a triage question rather than a credit.
+        let mut other = finding("src/cache.py", Some(26), "get() has no lock", "race");
+        other.id = "f0-9-0".into();
+        other.duplicate_of = Some("f0-0-1".into());
+        let mixed = vec![&canonical, &dup, &other];
+        assert_eq!(cluster_consensus(&canonical, &mixed, &defects), None);
     }
 
     #[test]
