@@ -46,16 +46,13 @@ pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
 /// with nothing to show) or simply the end of the run (a later one, with
 /// earlier generations worth reporting).
 #[derive(Debug, thiserror::Error)]
-#[error("every {phase} failed in generation {} ({launched}/{launched}); no {produced} was \
-         performed. See .locust/runs/{run_id}/transcripts/ for the provider errors",
-        generation + 1)]
+#[error("{detail}. See .locust/runs/{run_id}/transcripts/ for the provider errors")]
 struct GenerationAborted {
-    generation: u32,
-    /// What failed, as a noun: `reviewer`, `judge`.
+    /// What failed, as a noun: `reviewer`, `judge`. Decides whether earlier
+    /// generations are still worth reporting.
     phase: &'static str,
-    /// What therefore did not happen: `review`, `judging`.
-    produced: &'static str,
-    launched: usize,
+    /// The specific reason, built where it is known.
+    detail: String,
     run_id: String,
 }
 
@@ -441,10 +438,12 @@ impl Arena {
             // finished work, and throwing them away to report a later failure
             // loses the whole run for the sake of its last step.
             return Err(GenerationAborted {
-                generation,
                 phase: "reviewer",
-                produced: "review",
-                launched,
+                detail: format!(
+                    "every reviewer failed in generation {} ({launched}/{launched}); \
+                     no review was performed",
+                    generation + 1
+                ),
                 run_id: self.store.run_id.clone(),
             }
             .into());
@@ -500,10 +499,12 @@ impl Arena {
         let (calls, failed) = judge_calls.get();
         if calls > 0 && failed == calls {
             return Err(GenerationAborted {
-                generation,
                 phase: "judge",
-                produced: "judging",
-                launched: calls,
+                detail: format!(
+                    "every judge failed in generation {} ({calls}/{calls}); \
+                     no judging was performed",
+                    generation + 1
+                ),
                 run_id: self.store.run_id.clone(),
             }
             .into());
@@ -538,10 +539,24 @@ impl Arena {
             .filter(|f| !rulings.iter().any(|r| r.raw.finding_id == f.id))
             .map(|f| f.id.as_str()).collect();
         if !missing.is_empty() {
-            let message = format!("incomplete judgment in generation {}: no ruling for {}",
-                generation + 1, missing.join(", "));
-            self.warn(message.clone()).await;
-            bail!("{message}");
+            // Typed, not a plain `bail!`. The run loop downcasts this to decide
+            // whether earlier generations are still worth writing out; an
+            // untyped error returns straight past the report, discarding
+            // completed work that is already on disk. Reachable when judging is
+            // split across batches and one batch loses every judge while
+            // another succeeds, so the failed/total count stays partial.
+            let detail = format!(
+                "incomplete judgment in generation {}: no ruling for {}",
+                generation + 1,
+                missing.join(", ")
+            );
+            self.warn(detail.clone()).await;
+            return Err(GenerationAborted {
+                phase: "judge",
+                detail,
+                run_id: self.store.run_id.clone(),
+            }
+            .into());
         }
 
         Ok(GenerationOutcome {

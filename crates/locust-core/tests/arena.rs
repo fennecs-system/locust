@@ -1268,3 +1268,84 @@ fn defender_skeptic_traits_target_the_code_so_claim_experiments_use_neutral_trai
     std::fs::remove_dir_all(repo).ok();
     Ok(())
 }
+
+// --- review of the handoff's F1 implementation -----------------------------
+
+/// The handoff states its intent plainly: "fail a late judging abort after
+/// saving earlier completed generations." Its all-judges-failed path does that
+/// via `GenerationAborted`, which the run loop downcasts and breaks on.
+///
+/// Its second coverage check, in `generation()`, used a plain `bail!`. The run
+/// loop cannot downcast that, so it took `Err(other) => return Err(other)` and
+/// returned before writing any report — discarding generations that had
+/// already completed and been paid for.
+///
+/// Reachable whenever judging is split across batches and one batch loses
+/// every judge while another succeeds: the failed/total count stays partial,
+/// so the all-judges-failed guard does not fire, yet some finding has no
+/// ruling.
+#[tokio::test]
+async fn a_late_coverage_failure_still_reports_completed_generations() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(2, 2, &["alpha"]);
+    cfg.evolution.enabled = false;
+    // One finding per judge call, so the two findings land in separate batches.
+    cfg.arena.judge_batch = 1;
+
+    /// Judges everything except the second batch of the second generation,
+    /// which is what a batch-size-dependent timeout looks like.
+    struct AbandonsOneLateBatch(Scripted);
+
+    #[async_trait]
+    impl Provider for AbandonsOneLateBatch {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn model(&self) -> &str {
+            "scripted"
+        }
+        async fn complete(&self, req: Request) -> Result<Response> {
+            let judging = req.system.contains("adjudicating a code review");
+            if judging && req.label.starts_with("gen1-") && req.label.ends_with("-b1") {
+                return Ok(Response {
+                    text: r#"{"rulings":[]}"#.into(),
+                    usage: Usage::default(),
+                    provider: "alpha".into(),
+                    model: "scripted".into(),
+                });
+            }
+            self.0.complete(req).await
+        }
+    }
+
+    let provider: locust_provider::SharedProvider = Arc::new(AbandonsOneLateBatch(Scripted::new(
+        "alpha",
+        vec![
+            ("src/pool.rs", 2, "first distinct defect alpha", "local"),
+            ("src/pool.rs", 150, "second distinct defect beta", "local"),
+        ],
+    )));
+
+    let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
+    let run_dir = arena.run_dir().to_path_buf();
+    let result = arena.run().await;
+
+    // Failing is right: a review that did not judge everything must not pass.
+    assert!(result.is_err(), "incomplete judgment must fail the run");
+
+    // Generation 0 was judged, scored and written. That work must stay
+    // readable rather than being thrown away to report a later failure.
+    assert!(run_dir.join("gen-0/rulings.json").exists(), "generation 0 was written");
+    assert!(
+        run_dir.join("report.md").exists(),
+        "no report, so the completed generation is unreadable: {:?}",
+        result.as_ref().err().map(|e| e.to_string())
+    );
+    let report = std::fs::read_to_string(run_dir.join("report.md"))?;
+    assert!(report.contains("Caveats from this run"), "and it carries the caveat");
+    assert!(report.contains("incomplete judgment"), "naming what went wrong: {report:.400}");
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}

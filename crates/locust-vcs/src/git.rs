@@ -227,8 +227,13 @@ mod tests {
     /// A repo whose paths are everything a naive tab-splitting parser gets
     /// wrong: spaces, embedded tabs, non-ASCII, a rename and a binary file.
     fn hostile_repo() -> (PathBuf, GitVcs) {
-        let dir = std::env::temp_dir().join(format!("locust-git-{}", std::process::id()))
-            .join(format!("{:?}", std::time::SystemTime::now()).replace(['.', ' ', ':'], "_"));
+        // A per-call counter, not a timestamp. `SystemTime` has millisecond
+        // resolution on some platforms, so four tests starting together landed
+        // on the same directory name and raced `git init` against each other.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("locust-git-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         sh(&dir, &["init", "-q", "--initial-branch=main"]);
         sh(&dir, &["config", "user.email", "t@example.com"]);
