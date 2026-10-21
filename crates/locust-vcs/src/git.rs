@@ -22,7 +22,11 @@ impl GitVcs {
             .to_string();
         let root = PathBuf::from(top);
         let workspace_root = root.join(".locust").join("wt");
-        Ok(Self { root, workspace_root, add_lock: Mutex::new(()) })
+        Ok(Self {
+            root,
+            workspace_root,
+            add_lock: Mutex::new(()),
+        })
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
@@ -112,11 +116,18 @@ impl Vcs for GitVcs {
         // argument list. Each invocation emits complete, self-contained file
         // sections, so concatenating the chunks yields the same diff.
         for chunk in paths.chunks(300) {
-            let mut args: Vec<String> =
-                ["diff", "--no-color", "--no-ext-diff", "-M", "--unified=6", &range, "--"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+            let mut args: Vec<String> = [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "-M",
+                "--unified=6",
+                &range,
+                "--",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
             // `:(literal)` stops git reading a path that contains `*`, `?` or a
             // leading `:` as a glob or as pathspec magic.
@@ -186,10 +197,21 @@ impl Vcs for GitVcs {
             let _ = self.git(&["worktree", "remove", "--force", &path.to_string_lossy()]);
             let _ = std::fs::remove_dir_all(&path);
         }
-        self.git(&["worktree", "add", "--detach", "--quiet", &path.to_string_lossy(), rev])
-            .with_context(|| format!("creating worktree `{id}` at {rev}"))?;
+        self.git(&[
+            "worktree",
+            "add",
+            "--detach",
+            "--quiet",
+            &path.to_string_lossy(),
+            rev,
+        ])
+        .with_context(|| format!("creating worktree `{id}` at {rev}"))?;
 
-        Ok(Workspace { id: id.to_string(), path, rev: rev.to_string() })
+        Ok(Workspace {
+            id: id.to_string(),
+            path,
+            rev: rev.to_string(),
+        })
     }
 
     fn destroy_workspace(&self, ws: &Workspace) -> Result<()> {
@@ -232,8 +254,7 @@ mod tests {
         // on the same directory name and raced `git init` against each other.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("locust-git-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("locust-git-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         sh(&dir, &["init", "-q", "--initial-branch=main"]);
         sh(&dir, &["config", "user.email", "t@example.com"]);
@@ -272,7 +293,10 @@ mod tests {
 
         // Raw paths, not git's quoted rendering.
         for expected in ["with space.txt", "tab\there.txt", "héllo.txt"] {
-            assert!(paths.contains(&expected), "missing {expected:?} in {paths:?}");
+            assert!(
+                paths.contains(&expected),
+                "missing {expected:?} in {paths:?}"
+            );
         }
         assert!(
             !paths.iter().any(|p| p.starts_with('"')),
@@ -296,7 +320,12 @@ mod tests {
     fn line_counts_land_on_the_right_file() {
         let (dir, vcs) = hostile_repo();
         let files = vcs.changed_files("main", "feature").unwrap();
-        let get = |p: &str| files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("no {p}"));
+        let get = |p: &str| {
+            files
+                .iter()
+                .find(|f| f.path == p)
+                .unwrap_or_else(|| panic!("no {p}"))
+        };
 
         // keep.txt gained exactly one line; the old zip-based parser could
         // attribute another file's counts here without any error surfacing.
@@ -311,9 +340,15 @@ mod tests {
     fn a_rename_is_reported_under_its_new_path() {
         let (dir, vcs) = hostile_repo();
         let files = vcs.changed_files("main", "feature").unwrap();
-        let moved = files.iter().find(|f| f.path == "moved.txt").expect("renamed file");
+        let moved = files
+            .iter()
+            .find(|f| f.path == "moved.txt")
+            .expect("renamed file");
         assert_eq!(moved.status, ChangeStatus::Renamed);
-        assert!(!files.iter().any(|f| f.path == "original.txt"), "old path must not appear");
+        assert!(
+            !files.iter().any(|f| f.path == "original.txt"),
+            "old path must not appear"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -321,11 +356,19 @@ mod tests {
     fn a_path_scoped_diff_contains_only_those_paths() {
         let (dir, vcs) = hostile_repo();
         let full = vcs.diff("main", "feature").unwrap();
-        assert!(full.contains("Cargo.lock"), "the unscoped diff has everything");
+        assert!(
+            full.contains("Cargo.lock"),
+            "the unscoped diff has everything"
+        );
 
-        let scoped = vcs.diff_paths("main", "feature", &["keep.txt".to_string()]).unwrap();
+        let scoped = vcs
+            .diff_paths("main", "feature", &["keep.txt".to_string()])
+            .unwrap();
         assert!(scoped.contains("keep.txt"));
-        assert!(!scoped.contains("Cargo.lock"), "excluded content leaked: {scoped}");
+        assert!(
+            !scoped.contains("Cargo.lock"),
+            "excluded content leaked: {scoped}"
+        );
         assert!(!scoped.contains("héllo.txt"));
 
         // An empty path list is an empty diff, not the whole thing.
@@ -338,7 +381,9 @@ mod tests {
         let (dir, vcs) = hostile_repo();
         // `*.txt` as a pathspec would match several files; as a literal path it
         // matches nothing, which is what we want when passing real paths.
-        let scoped = vcs.diff_paths("main", "feature", &["*.txt".to_string()]).unwrap();
+        let scoped = vcs
+            .diff_paths("main", "feature", &["*.txt".to_string()])
+            .unwrap();
         assert!(scoped.is_empty(), "pathspec glob was interpreted: {scoped}");
         std::fs::remove_dir_all(&dir).ok();
     }

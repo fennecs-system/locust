@@ -21,12 +21,7 @@ use std::collections::HashMap;
 const MIN_EVIDENCE_LINE: usize = 12;
 
 /// Check every finding against the code it cites.
-pub fn verify(
-    vcs: &dyn Vcs,
-    rev: &str,
-    changed: &[ChangedFile],
-    findings: &mut [Finding],
-) {
+pub fn verify(vcs: &dyn Vcs, rev: &str, changed: &[ChangedFile], findings: &mut [Finding]) {
     let deleted: Vec<&str> = changed
         .iter()
         .filter(|f| f.status.is_deleted())
@@ -64,7 +59,10 @@ fn check(text: &str, finding: &Finding) -> Grounding {
     if let Some(line) = finding.raw.line {
         // Line numbers are 1-based; 0 means "the model did not really know".
         if line == 0 || line as usize > lines.len() {
-            return Grounding::LineOutOfRange { cited: line, file_lines: lines.len() };
+            return Grounding::LineOutOfRange {
+                cited: line,
+                file_lines: lines.len(),
+            };
         }
     }
 
@@ -101,11 +99,16 @@ fn check(text: &str, finding: &Finding) -> Grounding {
     // one distinctive run in common. A reviewer that read the code will share
     // a long run with it; one that invented the code will not.
     let dense_file = strip_ws(text);
-    if quoted.iter().any(|q| shares_a_run(&strip_ws(q), &dense_file)) {
+    if quoted
+        .iter()
+        .any(|q| shares_a_run(&strip_ws(q), &dense_file))
+    {
         return Grounding::Verified;
     }
 
-    Grounding::EvidenceNotFound { quoted_lines: quoted.len() }
+    Grounding::EvidenceNotFound {
+        quoted_lines: quoted.len(),
+    }
 }
 
 /// Shortest run of identical, whitespace-free source that counts as having
@@ -153,7 +156,10 @@ fn unprefixed(line: &str) -> Vec<String> {
 }
 
 fn normalize(path: &str) -> String {
-    path.trim().trim_start_matches("./").trim_start_matches('/').to_string()
+    path.trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Collapse whitespace so indentation and wrapping do not defeat a match that
@@ -203,7 +209,11 @@ mod tests {
 
     #[test]
     fn indentation_and_wrapping_do_not_break_a_genuine_quote() {
-        let f = finding("a.rs", Some(2), "```rust\n        let   scaled = n * 2;\n```");
+        let f = finding(
+            "a.rs",
+            Some(2),
+            "```rust\n        let   scaled = n * 2;\n```",
+        );
         assert_eq!(check(SRC, &f), Grounding::Verified);
     }
 
@@ -212,7 +222,10 @@ mod tests {
         let f = finding("a.rs", Some(900), "let scaled = n * 2;");
         assert_eq!(
             check(SRC, &f),
-            Grounding::LineOutOfRange { cited: 900, file_lines: 4 }
+            Grounding::LineOutOfRange {
+                cited: 900,
+                file_lines: 4
+            }
         );
     }
 
@@ -225,7 +238,10 @@ mod tests {
     #[test]
     fn invented_code_is_caught() {
         let f = finding("a.rs", Some(2), "self.cache.insert(key, value.clone());");
-        assert_eq!(check(SRC, &f), Grounding::EvidenceNotFound { quoted_lines: 1 });
+        assert_eq!(
+            check(SRC, &f),
+            Grounding::EvidenceNotFound { quoted_lines: 1 }
+        );
     }
 
     #[test]
@@ -299,7 +315,11 @@ mod tests {
 
         // The marker is not a licence to match anything: invented code with a
         // `+` in front is still invented.
-        let f = finding("a.rs", Some(2), "+    self.registry.insert(key, value.clone());");
+        let f = finding(
+            "a.rs",
+            Some(2),
+            "+    self.registry.insert(key, value.clone());",
+        );
         assert!(matches!(check(src, &f), Grounding::EvidenceNotFound { .. }));
     }
 
@@ -307,7 +327,10 @@ mod tests {
     fn short_quotes_must_match_in_full_but_long_ones_may_be_elided() {
         // Under the run threshold: nothing to elide, so it has to be there.
         let short = strip_ws("cache.insert(key, value);");
-        assert!(shares_a_run(&short, &strip_ws("self.cache.insert(key, value); // ok")));
+        assert!(shares_a_run(
+            &short,
+            &strip_ws("self.cache.insert(key, value); // ok")
+        ));
         assert!(!shares_a_run(&short, &strip_ws("self.cache.remove(&key);")));
 
         // Over the threshold: one distinctive run in common is enough, even
@@ -319,13 +342,20 @@ mod tests {
             "// leading\nfn reconcile_pending_sessions(&mut self, deadline: Instant) -> Result<usize> {\n    todo!()\n}",
         );
         assert!(shares_a_run(&long, &file));
-        assert!(!shares_a_run(&long, &strip_ws("fn something_entirely_different() -> () {}")));
+        assert!(!shares_a_run(
+            &long,
+            &strip_ws("fn something_entirely_different() -> () {}")
+        ));
     }
 
     #[test]
     fn short_fragments_are_not_treated_as_evidence() {
         // `scaled` appears, but matching on it would verify almost anything.
         let f = finding("a.rs", Some(2), "scaled");
-        assert_eq!(check(SRC, &f), Grounding::Verified, "too short to judge either way");
+        assert_eq!(
+            check(SRC, &f),
+            Grounding::Verified,
+            "too short to judge either way"
+        );
     }
 }

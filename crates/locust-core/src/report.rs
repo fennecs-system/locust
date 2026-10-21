@@ -11,7 +11,12 @@ use std::fmt::Write as _;
 pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     let mut s = String::new();
 
-    let _ = writeln!(s, "# Review `{}` → `{}`\n", short(&outcome.base), short(&outcome.target));
+    let _ = writeln!(
+        s,
+        "# Review `{}` → `{}`\n",
+        short(&outcome.base),
+        short(&outcome.target)
+    );
     let _ = writeln!(
         s,
         "_{} · {} generations · {:.1}s · {} in / {} out tokens{}_\n",
@@ -51,7 +56,14 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     if !outcome.themes.is_empty() {
         let _ = writeln!(s, "## What to look at\n");
         for (i, t) in outcome.themes.iter().enumerate() {
-            let _ = writeln!(s, "### {}. {} `{}` `{}`\n", i + 1, t.title, t.severity, t.altitude);
+            let _ = writeln!(
+                s,
+                "### {}. {} `{}` `{}`\n",
+                i + 1,
+                t.title,
+                t.severity,
+                t.altitude
+            );
             let _ = writeln!(s, "{}\n", t.summary.trim());
             if !t.root_cause.trim().is_empty() {
                 let _ = writeln!(s, "**Root cause.** {}\n", t.root_cause.trim());
@@ -68,12 +80,7 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     if !confirmed.is_empty() {
         let _ = writeln!(s, "## Confirmed findings\n");
         for (f, r) in &confirmed {
-            let _ = writeln!(
-                s,
-                "#### `{}` — {}\n",
-                f.location(),
-                f.raw.title
-            );
+            let _ = writeln!(s, "#### `{}` — {}\n", f.location(), f.raw.title);
             let _ = writeln!(
                 s,
                 "`{}` · `{}` · raised by _{}_ via `{}`{}\n",
@@ -109,12 +116,7 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
                     .iter()
                     .map(|v| {
                         let mark = if v.raw.verdict == verdict { "" } else { " ✗" };
-                        format!(
-                            "{}{mark} ({}, {})",
-                            v.judge,
-                            v.raw.verdict,
-                            v.provider
-                        )
+                        format!("{}{mark} ({}, {})", v.judge, v.raw.verdict, v.provider)
                     })
                     .collect();
                 let mut notes = Vec::new();
@@ -124,8 +126,11 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
                 if r.altitude_spread() > 0 {
                     notes.push(format!("split {} steps on altitude", r.altitude_spread()));
                 }
-                let suffix =
-                    if notes.is_empty() { String::new() } else { format!(" — {}", notes.join(", ")) };
+                let suffix = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", notes.join(", "))
+                };
                 let headline = if r.unanimous() {
                     format!("**Panel: unanimous on the verdict ({total}/{total}){suffix}.**")
                 } else {
@@ -134,7 +139,11 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
                 let _ = writeln!(s, "{headline} {}\n", votes.join(" · "));
             }
             if !r.raw.reasoning.trim().is_empty() {
-                let _ = writeln!(s, "<sub>{}</sub>\n", r.raw.reasoning.trim().replace('\n', "<br>"));
+                let _ = writeln!(
+                    s,
+                    "<sub>{}</sub>\n",
+                    r.raw.reasoning.trim().replace('\n', "<br>")
+                );
             }
             let _ = writeln!(s, "<sub>`{}`</sub>\n", f.id);
         }
@@ -147,14 +156,24 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
         .generations
         .iter()
         .flat_map(|g| {
-            g.rulings.iter().filter(|r| r.raw.verdict == Verdict::Refuted).filter_map(move |r| {
-                g.findings.iter().find(|f| f.id == r.raw.finding_id).map(|f| (f, r))
-            })
+            g.rulings
+                .iter()
+                .filter(|r| r.raw.verdict == Verdict::Refuted)
+                .filter_map(move |r| {
+                    g.findings
+                        .iter()
+                        .find(|f| f.id == r.raw.finding_id)
+                        .map(|f| (f, r))
+                })
         })
         .collect();
 
     if !refuted.is_empty() {
-        let _ = writeln!(s, "<details>\n<summary>Refuted ({})</summary>\n", refuted.len());
+        let _ = writeln!(
+            s,
+            "<details>\n<summary>Refuted ({})</summary>\n",
+            refuted.len()
+        );
         for (f, r) in &refuted {
             let _ = writeln!(
                 s,
@@ -172,9 +191,15 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
         .generations
         .iter()
         .flat_map(|g| {
-            g.rulings.iter().filter(|r| r.contested()).filter_map(move |r| {
-                g.findings.iter().find(|f| f.id == r.raw.finding_id).map(|f| (f, r))
-            })
+            g.rulings
+                .iter()
+                .filter(|r| r.contested())
+                .filter_map(move |r| {
+                    g.findings
+                        .iter()
+                        .find(|f| f.id == r.raw.finding_id)
+                        .map(|f| (f, r))
+                })
         })
         .collect();
 
@@ -216,8 +241,14 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     }
 
     let _ = writeln!(s, "## Arena\n");
-    let _ = writeln!(s, "| gen | pressure | raised | confirmed | refuted | undecided | best persona |");
-    let _ = writeln!(s, "|----:|---------:|-------:|----------:|--------:|----------:|--------------|");
+    let _ = writeln!(
+        s,
+        "| gen | pressure | raised | confirmed | refuted | undecided | best persona |"
+    );
+    let _ = writeln!(
+        s,
+        "|----:|---------:|-------:|----------:|--------:|----------:|--------------|"
+    );
     for g in &outcome.generations {
         let count = |v: Verdict| g.rulings.iter().filter(|r| r.raw.verdict == v).count();
         let best = g
@@ -238,7 +269,10 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
     }
 
     let _ = writeln!(s, "\n### Altitude by generation\n");
-    let _ = writeln!(s, "Confirmed findings, by how far from a single line the problem lived.\n");
+    let _ = writeln!(
+        s,
+        "Confirmed findings, by how far from a single line the problem lived.\n"
+    );
     let _ = writeln!(s, "| gen | line | local | module | architectural |");
     let _ = writeln!(s, "|----:|-----:|------:|-------:|--------------:|");
     for g in &outcome.generations {
@@ -272,7 +306,11 @@ pub fn markdown(outcome: &RunOutcome, cfg: &Config) -> String {
             if ruling.panel.len() > 1 {
                 let _ = writeln!(s, "\n### Judging panel\n");
                 for v in &ruling.panel {
-                    let _ = writeln!(s, "- **{}** `{}` — weight {:.1}", v.judge, v.traits, v.weight);
+                    let _ = writeln!(
+                        s,
+                        "- **{}** `{}` — weight {:.1}",
+                        v.judge, v.traits, v.weight
+                    );
                 }
                 let unanimous: usize = outcome
                     .generations

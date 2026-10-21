@@ -80,14 +80,23 @@ impl Case {
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
         if !dir.join("base").is_dir() || !dir.join("head").is_dir() {
-            bail!("case `{}` needs both a base/ and a head/ tree", manifest.name);
+            bail!(
+                "case `{}` needs both a base/ and a head/ tree",
+                manifest.name
+            );
         }
         for d in &manifest.defects {
             if d.matches.is_empty() {
-                bail!("defect `{}` has no `matches`; it could never be credited", d.id);
+                bail!(
+                    "defect `{}` has no `matches`; it could never be credited",
+                    d.id
+                );
             }
         }
-        Ok(Self { manifest, dir: dir.to_path_buf() })
+        Ok(Self {
+            manifest,
+            dir: dir.to_path_buf(),
+        })
     }
 
     /// Every case directory under `root`, in a stable order.
@@ -127,7 +136,11 @@ impl Case {
                 .output()
                 .context("running git")?;
             if !out.status.success() {
-                bail!("git {:?}: {}", args, String::from_utf8_lossy(&out.stderr).trim());
+                bail!(
+                    "git {:?}: {}",
+                    args,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
             }
             Ok(())
         };
@@ -197,7 +210,10 @@ fn cluster_consensus(
     defects: &[Defect],
 ) -> Option<Classified> {
     let mut agreed: Option<Classified> = None;
-    for sibling in all.iter().filter(|f| f.duplicate_of.as_deref() == Some(&canonical.id)) {
+    for sibling in all
+        .iter()
+        .filter(|f| f.duplicate_of.as_deref() == Some(&canonical.id))
+    {
         match classify(sibling, defects) {
             Classified::Unclassified => continue,
             placed => match &agreed {
@@ -219,7 +235,9 @@ fn cluster_consensus(
 /// matches are left for human triage rather than settled by manifest order.
 pub fn classify(finding: &Finding, defects: &[Defect]) -> Classified {
     match matching(finding, defects).as_slice() {
-        [one] => Classified::Real { defect: one.id.clone() },
+        [one] => Classified::Real {
+            defect: one.id.clone(),
+        },
         // None, or several: a finding that fits more than one planted defect
         // needs a human, regardless of manifest order. `Scorecard::build`
         // reports which entries it straddled rather than discarding that.
@@ -249,12 +267,20 @@ pub fn matching<'a>(finding: &Finding, defects: &'a [Defect]) -> Vec<&'a Defect>
             (Some([lo, hi]), Some(line)) => line + LINE_SLACK >= lo && line <= hi + LINE_SLACK,
             _ => true,
         })
-        .filter(|defect| defect.matches.iter().all(|m| haystack.contains(&m.to_lowercase())))
+        .filter(|defect| {
+            defect
+                .matches
+                .iter()
+                .all(|m| haystack.contains(&m.to_lowercase()))
+        })
         .collect()
 }
 
 fn normalize(path: &str) -> String {
-    path.trim().trim_start_matches("./").trim_start_matches('/').to_lowercase()
+    path.trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_lowercase()
 }
 
 /// How one case went.
@@ -327,8 +353,11 @@ impl Scorecard {
 
         // Every finding raised, so a cluster's duplicates can speak for a
         // canonical member the manifest cannot place.
-        let all_findings: Vec<&Finding> =
-            outcome.generations.iter().flat_map(|g| g.findings.iter()).collect();
+        let all_findings: Vec<&Finding> = outcome
+            .generations
+            .iter()
+            .flat_map(|g| g.findings.iter())
+            .collect();
 
         for (finding, _) in outcome.confirmed_findings() {
             let mut verdict = classify(finding, &case.manifest.defects);
@@ -357,7 +386,8 @@ impl Scorecard {
             // when the canonical member is unplaceable and the duplicates
             // agree on exactly one defect.
             if verdict == Classified::Unclassified {
-                if let Some(agreed) = cluster_consensus(finding, &all_findings, &case.manifest.defects)
+                if let Some(agreed) =
+                    cluster_consensus(finding, &all_findings, &case.manifest.defects)
                 {
                     verdict = agreed;
                 }
@@ -437,11 +467,21 @@ mod tests {
         for (line, text, expected) in examples {
             let mut f = finding("src/cache.py", Some(line), text, "");
             assert_eq!(classify(&f, &case.manifest.defects), expected);
-            f.raw.evidence = "get() lock _hits KeyError LRU put() evict update size() purge_expired() iteration".into();
+            f.raw.evidence =
+                "get() lock _hits KeyError LRU put() evict update size() purge_expired() iteration"
+                    .into();
             assert_eq!(classify(&f, &case.manifest.defects), expected);
         }
-        let ambiguous = finding("src/cache.py", Some(30), "get() has no lock and put() evicts when updating", "");
-        assert_eq!(classify(&ambiguous, &case.manifest.defects), Classified::Unclassified);
+        let ambiguous = finding(
+            "src/cache.py",
+            Some(30),
+            "get() has no lock and put() evicts when updating",
+            "",
+        );
+        assert_eq!(
+            classify(&ambiguous, &case.manifest.defects),
+            Classified::Unclassified
+        );
         let mut reversed = case.manifest.defects.clone();
         reversed.reverse();
         assert_eq!(classify(&ambiguous, &reversed), Classified::Unclassified);
@@ -453,11 +493,16 @@ mod tests {
         let case = Case::load(&root).unwrap();
         // Verbatim finding from the live run cited by the handoff. Its title,
         // claim and scenario must all be tested for keyword collisions.
-        let mut reported = finding("src/cache.py", Some(25),
+        let mut reported = finding(
+            "src/cache.py",
+            Some(25),
             r#"Unlocked refresh in get() resurrects a session just evicted by put()"#,
-            r#"get() reads the entry, then later writes `self._entries[key] = (value, time.time() + self.ttl)` without holding `self._lock`. If put() evicts that key under the lock between get's read and its write-back, get re-inserts the evicted session with a fresh TTL. This undoes the eviction and pushes the store past max_entries."#);
+            r#"get() reads the entry, then later writes `self._entries[key] = (value, time.time() + self.ttl)` without holding `self._lock`. If put() evicts that key under the lock between get's read and its write-back, get re-inserts the evicted session with a fresh TTL. This undoes the eviction and pushes the store past max_entries."#,
+        );
         reported.raw.failure_scenario = r#"The cache is full. Thread A in get('u1') has read `entry` and passed the expiry check. Thread B in put('u2') holds the lock, finds 'u1' coldest, and deletes it from _entries and _hits, then inserts 'u2'. Thread A resumes and runs `self._hits['u1'] = 0+1` and `self._entries['u1'] = (value, now+ttl)`. 'u1' is alive again with a full new TTL, and len(_entries) == max_entries+1. The same happens if purge_expired removes the key in that window. Each such race adds one more entry beyond the bound."#.into();
-        let expected = Classified::Real { defect: "unlocked-read-write".into() };
+        let expected = Classified::Real {
+            defect: "unlocked-read-write".into(),
+        };
         assert_eq!(classify(&reported, &case.manifest.defects), expected);
         let mut reversed = case.manifest.defects.clone();
         reversed.reverse();
@@ -545,10 +590,17 @@ mod tests {
         .unwrap();
 
         let card = Scorecard::build(&case, &outcome);
-        assert_eq!(card.straddled.len(), 1, "the straddle must be reported: {card:?}");
+        assert_eq!(
+            card.straddled.len(),
+            1,
+            "the straddle must be reported: {card:?}"
+        );
         assert!(card.straddled[0].contains("denial-swallowed-in-save-invoice"));
         assert!(card.straddled[0].contains("write-precedes-the-check"));
-        for id in ["denial-swallowed-in-save-invoice", "write-precedes-the-check"] {
+        for id in [
+            "denial-swallowed-in-save-invoice",
+            "write-precedes-the-check",
+        ] {
             assert!(
                 !card.real_missed.contains(&id.to_string()),
                 "`{id}` was described by a confirmed finding, so it is not missed: {:?}",
@@ -556,22 +608,49 @@ mod tests {
             );
         }
         // The defects nothing described are still missed.
-        assert!(card.real_missed.contains(&"cache-keyed-on-user-alone".to_string()));
+        assert!(card
+            .real_missed
+            .contains(&"cache-keyed-on-user-alone".to_string()));
     }
 
     #[test]
     fn a_finding_matching_location_and_keywords_is_credited() {
-        let defects = vec![defect("desync", "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
-        let f = finding("src/cache.py", Some(22), "expiry leaves _hits populated", "_evict then raises KeyError");
-        assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
+        let defects = vec![defect(
+            "desync",
+            "src/cache.py",
+            Some([20, 36]),
+            &["_hits", "KeyError"],
+        )];
+        let f = finding(
+            "src/cache.py",
+            Some(22),
+            "expiry leaves _hits populated",
+            "_evict then raises KeyError",
+        );
+        assert_eq!(
+            classify(&f, &defects),
+            Classified::Real {
+                defect: "desync".into()
+            }
+        );
     }
 
     #[test]
     fn location_alone_does_not_credit_a_neighbouring_defect() {
         // Planted defects cluster in the same function; without the keyword
         // requirement each would be credited for the other's discovery.
-        let defects = vec![defect("desync", "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
-        let f = finding("src/cache.py", Some(24), "get() mutates shared state without the lock", "a race");
+        let defects = vec![defect(
+            "desync",
+            "src/cache.py",
+            Some([20, 36]),
+            &["_hits", "KeyError"],
+        )];
+        let f = finding(
+            "src/cache.py",
+            Some(24),
+            "get() mutates shared state without the lock",
+            "a race",
+        );
         assert_eq!(classify(&f, &defects), Classified::Unclassified);
     }
 
@@ -586,10 +665,25 @@ mod tests {
     fn a_reviewer_citing_the_symptom_rather_than_the_cause_still_matches() {
         let defects = vec![defect("desync", "src/cache.py", Some([20, 20]), &["_hits"])];
         // 40 lines away is the same defect seen from `_evict`; slack covers it.
-        let f = finding("src/cache.py", Some(38), "_hits and _entries disagree", "boom");
-        assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
+        let f = finding(
+            "src/cache.py",
+            Some(38),
+            "_hits and _entries disagree",
+            "boom",
+        );
+        assert_eq!(
+            classify(&f, &defects),
+            Classified::Real {
+                defect: "desync".into()
+            }
+        );
         // 300 lines away is a different part of the file.
-        let far = finding("src/cache.py", Some(300), "_hits and _entries disagree", "boom");
+        let far = finding(
+            "src/cache.py",
+            Some(300),
+            "_hits and _entries disagree",
+            "boom",
+        );
         assert_eq!(classify(&far, &defects), Classified::Unclassified);
     }
 
@@ -597,22 +691,30 @@ mod tests {
     fn a_defect_with_no_line_range_matches_anywhere_in_its_file() {
         let defects = vec![defect("anywhere", "a.rs", None, &["widget"])];
         let f = finding("a.rs", Some(9999), "widget is wrong", "x");
-        assert_eq!(classify(&f, &defects), Classified::Real { defect: "anywhere".into() });
+        assert_eq!(
+            classify(&f, &defects),
+            Classified::Real {
+                defect: "anywhere".into()
+            }
+        );
     }
 
     #[test]
     fn paths_are_compared_leniently() {
         let defects = vec![defect("d", "src/cache.py", None, &["x"])];
         let f = finding("./src/cache.py", None, "x happens", "x");
-        assert_eq!(classify(&f, &defects), Classified::Real { defect: "d".into() });
+        assert_eq!(
+            classify(&f, &defects),
+            Classified::Real { defect: "d".into() }
+        );
     }
 
     /// The case has to become a repository whose diff is exactly the change,
     /// or the arena reviews the wrong thing and every score is meaningless.
     #[test]
     fn a_case_materialises_into_a_repo_whose_diff_is_the_change() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cases/session-cache");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/session-cache");
         if !root.exists() {
             return; // cases are optional for a library consumer
         }
@@ -638,13 +740,21 @@ mod tests {
         assert!(diff.contains("max_entries"), "the change is in the diff");
         assert!(diff.contains("_hits"), "and so is the planted defect");
         // api.py is identical in both trees, so it must not appear.
-        assert!(!diff.contains("api.py"), "unchanged files must not be in the diff");
+        assert!(
+            !diff.contains("api.py"),
+            "unchanged files must not be in the diff"
+        );
 
         // Every file a defect names has to exist at the reviewed revision,
         // otherwise the citation check would reject correct findings.
         for d in &case.manifest.defects {
             let shown = git(&["show", &format!("change:{}", d.file)]);
-            assert!(!shown.is_empty(), "defect `{}` names a missing file {}", d.id, d.file);
+            assert!(
+                !shown.is_empty(),
+                "defect `{}` names a missing file {}",
+                d.id,
+                d.file
+            );
         }
 
         std::fs::remove_dir_all(&tmp).ok();
@@ -664,8 +774,8 @@ mod tests {
     /// recall and names the wrong defect as missed.
     #[test]
     fn a_found_defect_is_not_reported_as_missed_through_a_broad_neighbour() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cases/session-cache");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/session-cache");
         if !root.exists() {
             return;
         }
@@ -685,7 +795,9 @@ mod tests {
 
         assert_eq!(
             classify(&reported, &case.manifest.defects),
-            Classified::Real { defect: "hits-entries-desync".into() },
+            Classified::Real {
+                defect: "hits-entries-desync".into()
+            },
         );
     }
 
@@ -724,14 +836,21 @@ mod tests {
         assert_eq!(classify(&canonical, &defects), Classified::Unclassified);
 
         // Narrow duplicates beneath it, each placeable.
-        let mut dup = finding("src/cache.py", Some(20), "stale _hits key", "later puts raise KeyError");
+        let mut dup = finding(
+            "src/cache.py",
+            Some(20),
+            "stale _hits key",
+            "later puts raise KeyError",
+        );
         dup.id = "f0-2-0".into();
         dup.duplicate_of = Some("f0-0-1".into());
 
         let all = vec![&canonical, &dup];
         assert_eq!(
             cluster_consensus(&canonical, &all, &defects),
-            Some(Classified::Real { defect: "desync".into() }),
+            Some(Classified::Real {
+                defect: "desync".into()
+            }),
         );
 
         // A mixed cluster stays a triage question rather than a credit.
@@ -762,5 +881,4 @@ mod tests {
         assert_eq!(empty.recall(), 0.0);
         assert_eq!(empty.defence_pushback(), 0.0);
     }
-
 }

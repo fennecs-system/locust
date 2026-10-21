@@ -118,8 +118,14 @@ pub trait Vcs: Send + Sync {
     fn range(&self, base: &str, target: &str) -> Result<ReviewRange> {
         let base = self.resolve(base)?;
         let target = self.resolve(target)?;
-        let merge_base = self.merge_base(&base, &target).unwrap_or_else(|_| base.clone());
-        Ok(ReviewRange { base, target, merge_base })
+        let merge_base = self
+            .merge_base(&base, &target)
+            .unwrap_or_else(|_| base.clone());
+        Ok(ReviewRange {
+            base,
+            target,
+            merge_base,
+        })
     }
 }
 

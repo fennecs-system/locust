@@ -253,13 +253,21 @@ pub fn defend(
     for f in findings {
         let _ = writeln!(user, "---\n");
         let _ = writeln!(user, "**{}** — `{}`", f.id, f.location());
-        let _ = writeln!(user, "\n_{}_ (claimed {}, {} altitude, confidence {:.2})\n", f.raw.title, f.raw.severity, f.raw.altitude, f.raw.confidence);
+        let _ = writeln!(
+            user,
+            "\n_{}_ (claimed {}, {} altitude, confidence {:.2})\n",
+            f.raw.title, f.raw.severity, f.raw.altitude, f.raw.confidence
+        );
         let _ = writeln!(user, "Claim: {}", f.raw.claim);
         if !f.raw.failure_scenario.trim().is_empty() {
             let _ = writeln!(user, "\nFailure scenario: {}", f.raw.failure_scenario);
         }
         if !f.raw.evidence.trim().is_empty() {
-            let _ = writeln!(user, "\nEvidence offered:\n```\n{}\n```", f.raw.evidence.trim());
+            let _ = writeln!(
+                user,
+                "\nEvidence offered:\n```\n{}\n```",
+                f.raw.evidence.trim()
+            );
         }
         if let Some(note) = f.grounding.note() {
             let _ = writeln!(
@@ -271,7 +279,10 @@ pub fn defend(
         }
     }
 
-    let _ = writeln!(user, "\n---\n\nAnswer every finding above. Return the JSON object only.");
+    let _ = writeln!(
+        user,
+        "\n---\n\nAnswer every finding above. Return the JSON object only."
+    );
     Prompt { system, user }
 }
 
@@ -369,7 +380,10 @@ pub fn judge(
         for s in settled {
             let _ = writeln!(user, "- [{}] `{}` — {}", s.verdict, s.location, s.title);
         }
-        let _ = writeln!(user, "\nMark a finding `novel: false` if it restates one of these.");
+        let _ = writeln!(
+            user,
+            "\nMark a finding `novel: false` if it restates one of these."
+        );
     }
 
     let _ = writeln!(user, "\n### Cases\n");
@@ -412,7 +426,11 @@ pub fn judge(
             let _ = writeln!(user, "\n**Defence:** none offered.");
         } else {
             for r in rebuttals {
-                let _ = writeln!(user, "\n**Defence ({:?}):** {}", r.raw.stance, r.raw.argument);
+                let _ = writeln!(
+                    user,
+                    "\n**Defence ({:?}):** {}",
+                    r.raw.stance, r.raw.argument
+                );
                 if !r.raw.evidence.trim().is_empty() {
                     let _ = writeln!(user, "\nSupporting:\n```\n{}\n```", r.raw.evidence.trim());
                 }
@@ -420,7 +438,10 @@ pub fn judge(
         }
     }
 
-    let _ = writeln!(user, "\n---\n\nRule on every case. Return the JSON object only.");
+    let _ = writeln!(
+        user,
+        "\n---\n\nRule on every case. Return the JSON object only."
+    );
     Prompt { system, user }
 }
 
@@ -502,7 +523,10 @@ pub fn mutate(persona: &Persona, fitness: &Fitness, evidence: &str, pressure: f6
         persona.name
     );
 
-    Prompt { system: MUTATE_RULES.to_string(), user }
+    Prompt {
+        system: MUTATE_RULES.to_string(),
+        user,
+    }
 }
 
 const CROSSOVER_RULES: &str = "\
@@ -543,7 +567,10 @@ pub fn crossover(a: &(Persona, Fitness), b: &(Persona, Fitness)) -> Prompt {
         "Return JSON only:\n\n{{\n  \"name\": \"two or three words, lowercase\",\n  \
          \"focus\": \"one line\",\n  \"prompt\": \"the new system prompt\"\n}}"
     );
-    Prompt { system: CROSSOVER_RULES.to_string(), user }
+    Prompt {
+        system: CROSSOVER_RULES.to_string(),
+        user,
+    }
 }
 
 const SYNTHESIS_RULES: &str = "\
@@ -597,7 +624,10 @@ pub fn synthesize(
             if dissenters.is_empty() {
                 format!(" _(panel {backing}/{total}, unanimous)_")
             } else {
-                format!(" _(panel {backing}/{total}; {} disagreed)_", dissenters.join(", "))
+                format!(
+                    " _(panel {backing}/{total}; {} disagreed)_",
+                    dissenters.join(", ")
+                )
             }
         } else {
             String::new()
@@ -635,7 +665,10 @@ pub fn synthesize(
          \"recommendation\": \"one concrete sentence\",\n      \
          \"finding_ids\": [\"f-...\"]\n    }}\n  ]\n}}"
     );
-    Prompt { system: SYNTHESIS_RULES.to_string(), user }
+    Prompt {
+        system: SYNTHESIS_RULES.to_string(),
+        user,
+    }
 }
 
 /// Wrap rendered trait text in a header, or produce nothing at all when the
@@ -662,7 +695,13 @@ pub fn wants_workspace(cfg: &Config, provider_needs: bool) -> bool {
 }
 
 /// Stable agent id, used for the worktree directory and run artifacts.
-pub fn agent_id(generation: u32, role: Role, persona: &Persona, provider: &str, index: usize) -> String {
+pub fn agent_id(
+    generation: u32,
+    role: Role,
+    persona: &Persona,
+    provider: &str,
+    index: usize,
+) -> String {
     format!(
         "gen{generation}-{}-{}-{}-{index}",
         role.short(),

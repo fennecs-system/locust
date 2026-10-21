@@ -121,14 +121,20 @@ impl TraitConfig {
         };
         for (value, axis) in [
             (self.openness, crate::traits::Axis::Openness),
-            (self.conscientiousness, crate::traits::Axis::Conscientiousness),
+            (
+                self.conscientiousness,
+                crate::traits::Axis::Conscientiousness,
+            ),
             (self.extraversion, crate::traits::Axis::Extraversion),
             (self.agreeableness, crate::traits::Axis::Agreeableness),
             (self.neuroticism, crate::traits::Axis::Neuroticism),
         ] {
             if let Some(v) = value {
                 if !(0.0..=1.0).contains(&v) {
-                    bail!("{what}: `{}` must be between 0.0 and 1.0, got {v}", axis.name());
+                    bail!(
+                        "{what}: `{}` must be between 0.0 and 1.0, got {v}",
+                        axis.name()
+                    );
                 }
                 t.set(axis, v);
             }
@@ -415,7 +421,11 @@ pub struct SynthesisConfig {
 
 impl Default for SynthesisConfig {
     fn default() -> Self {
-        Self { enabled: true, provider: None, max_themes: 8 }
+        Self {
+            enabled: true,
+            provider: None,
+            max_themes: 8,
+        }
     }
 }
 
@@ -549,12 +559,16 @@ impl ProviderConfig {
                         self.base_url.clone(),
                         &key_env,
                     )?),
-                    Wire::OpenAi => {
-                        Arc::new(api::OpenAiProvider::new(settings, self.base_url.clone(), &key_env)?)
-                    }
-                    Wire::Gemini => {
-                        Arc::new(api::GeminiProvider::new(settings, self.base_url.clone(), &key_env)?)
-                    }
+                    Wire::OpenAi => Arc::new(api::OpenAiProvider::new(
+                        settings,
+                        self.base_url.clone(),
+                        &key_env,
+                    )?),
+                    Wire::Gemini => Arc::new(api::GeminiProvider::new(
+                        settings,
+                        self.base_url.clone(),
+                        &key_env,
+                    )?),
                 };
                 Ok(p)
             }
@@ -613,7 +627,10 @@ fn infer_wire(name: &str) -> Option<Wire> {
         Some(Wire::Anthropic)
     } else if n.contains("gemini") || n.contains("google") {
         Some(Wire::Gemini)
-    } else if n.contains("openai") || n.contains("gpt") || n.contains("openrouter") || n.contains("groq")
+    } else if n.contains("openai")
+        || n.contains("gpt")
+        || n.contains("openrouter")
+        || n.contains("groq")
     {
         Some(Wire::OpenAi)
     } else {
@@ -693,10 +710,10 @@ pub fn slug(s: &str) -> String {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let cfg: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -724,9 +741,13 @@ impl Config {
                 bail!("duplicate provider name `{}`", p.name);
             }
         }
-        for name in [&self.arena.judge, &self.evolution.meta_provider, &self.synthesis.provider]
-            .into_iter()
-            .flatten()
+        for name in [
+            &self.arena.judge,
+            &self.evolution.meta_provider,
+            &self.synthesis.provider,
+        ]
+        .into_iter()
+        .flatten()
         {
             if !self.providers.iter().any(|p| &p.name == name) {
                 bail!("`{name}` is named as a role provider but is not configured");
@@ -806,7 +827,11 @@ impl Config {
             .filter(|p| p.role == role)
             .map(|p| p.to_persona(0))
             .collect::<Result<_>>()?;
-        Ok(if configured.is_empty() { crate::seeds::library(role) } else { configured })
+        Ok(if configured.is_empty() {
+            crate::seeds::library(role)
+        } else {
+            configured
+        })
     }
 
     /// The judging panel. Three contrasting temperaments by default: a finding
@@ -892,23 +917,34 @@ mod tests {
     #[test]
     fn config_survives_a_toml_round_trip() {
         let mut cfg = Config::default();
-        cfg.providers.push(sample_provider("claude-cli", ProviderKind::Cli));
-        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("claude-cli", ProviderKind::Cli));
+        cfg.providers
+            .push(sample_provider("anthropic", ProviderKind::Api));
         cfg.personas.push(PersonaConfig {
             name: "migration safety".into(),
             role: Role::Attacker,
             prompt: "You review every change as though it will be half-deployed.".into(),
             focus: "deploy windows".into(),
             temperature: Some(0.7),
-            traits: TraitConfig { neuroticism: Some(0.85), ..Default::default() },
+            traits: TraitConfig {
+                neuroticism: Some(0.85),
+                ..Default::default()
+            },
         });
 
         let text = toml::to_string_pretty(&cfg).expect("config must serialise to TOML");
         let back: Config = toml::from_str(&text).expect("and parse back");
 
         assert_eq!(back.providers.len(), 2);
-        assert_eq!(back.providers[0].extract, Some(Extract::JsonPath("result".into())));
-        assert_eq!(back.providers[0].env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(
+            back.providers[0].extract,
+            Some(Extract::JsonPath("result".into()))
+        );
+        assert_eq!(
+            back.providers[0].env.get("FOO").map(String::as_str),
+            Some("bar")
+        );
         assert_eq!(back.personas[0].name, "migration safety");
         assert_eq!(back.run.generations, cfg.run.generations);
         back.validate().unwrap();
@@ -941,7 +977,10 @@ mod tests {
         assert_eq!(judge.weight, 2.0);
         assert_eq!(judge.traits.neuroticism, 0.9);
         // The preset supplies the axes the config did not override.
-        assert_eq!(judge.traits.agreeableness, Traits::preset("skeptic").unwrap().agreeableness);
+        assert_eq!(
+            judge.traits.agreeableness,
+            Traits::preset("skeptic").unwrap().agreeableness
+        );
 
         for bad in [
             "[[judge]]\nname = \"x\"\nneurotisism = 0.9\n",
@@ -960,7 +999,10 @@ mod tests {
             name: "x".into(),
             provider: None,
             weight: 1.0,
-            traits: TraitConfig { neuroticism: Some(1.5), ..Default::default() },
+            traits: TraitConfig {
+                neuroticism: Some(1.5),
+                ..Default::default()
+            },
         };
         assert!(judge.to_judge().is_err(), "1.5 is not a valid trait value");
 
@@ -968,7 +1010,10 @@ mod tests {
             name: "x".into(),
             provider: None,
             weight: 1.0,
-            traits: TraitConfig { preset: Some("grumpy".into()), ..Default::default() },
+            traits: TraitConfig {
+                preset: Some("grumpy".into()),
+                ..Default::default()
+            },
         };
         let err = judge.to_judge().unwrap_err().to_string();
         assert!(err.contains("unknown trait preset"), "got: {err}");
@@ -982,7 +1027,10 @@ mod tests {
         let cfg = Config::default();
         let panel = cfg.panel().unwrap();
         assert_eq!(panel.len(), 1);
-        assert!(panel[0].traits.is_neutral(), "an unconfigured judge states no temperament");
+        assert!(
+            panel[0].traits.is_neutral(),
+            "an unconfigured judge states no temperament"
+        );
     }
 
     /// Declaring judges replaces the default entirely, and the contrasting
@@ -998,7 +1046,10 @@ mod tests {
         .unwrap();
         let panel = cfg.panel().unwrap();
         assert_eq!(panel.len(), 3);
-        assert!(panel.iter().all(|j| !j.traits.is_neutral()), "a neutral panel measures nothing");
+        assert!(
+            panel.iter().all(|j| !j.traits.is_neutral()),
+            "a neutral panel measures nothing"
+        );
         assert_ne!(panel[0].traits, panel[1].traits);
         assert_ne!(panel[1].traits, panel[2].traits);
     }
@@ -1006,7 +1057,8 @@ mod tests {
     #[test]
     fn a_judge_naming_a_missing_provider_is_rejected() {
         let mut cfg = Config::default();
-        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("anthropic", ProviderKind::Api));
         cfg.judges.push(JudgeConfig {
             name: "pinned".into(),
             provider: Some("nowhere".into()),
@@ -1024,7 +1076,8 @@ mod tests {
         // severity mean and the dissent figure all become meaningless.
         for weight in [f64::INFINITY, f64::NAN, f64::NEG_INFINITY, -1.0] {
             let mut cfg = Config::default();
-            cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+            cfg.providers
+                .push(sample_provider("anthropic", ProviderKind::Api));
             cfg.judges.push(JudgeConfig {
                 name: "bad".into(),
                 provider: None,
@@ -1038,7 +1091,8 @@ mod tests {
     #[test]
     fn a_panel_where_no_vote_counts_is_rejected() {
         let mut cfg = Config::default();
-        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("anthropic", ProviderKind::Api));
         cfg.judges.push(JudgeConfig {
             name: "mute".into(),
             provider: None,
@@ -1068,8 +1122,14 @@ mod tests {
         let cfg: Config = toml::from_str(before).expect("a pre-existing config must still parse");
         cfg.validate().unwrap();
         // Settings the old file never mentioned fall back to their defaults.
-        assert_eq!(cfg.scoring.consensus_weight, ScoringConfig::default().consensus_weight);
-        assert_eq!(cfg.scoring.confirmed, 3.0, "and the ones it did set are honoured");
+        assert_eq!(
+            cfg.scoring.consensus_weight,
+            ScoringConfig::default().consensus_weight
+        );
+        assert_eq!(
+            cfg.scoring.confirmed, 3.0,
+            "and the ones it did set are honoured"
+        );
         assert_eq!(cfg.arena.judge_batch, ArenaConfig::default().judge_batch);
         assert_eq!(cfg.run.parallelism, RunConfig::default().parallelism);
         assert_eq!(cfg.evolution.mutants, EvolutionConfig::default().mutants);
@@ -1090,7 +1150,10 @@ mod tests {
             let text = format!(
                 "[[provider]]\nname = \"anthropic\"\nkind = \"api\"\nwire = \"anthropic\"\n\n{bad}"
             );
-            assert!(toml::from_str::<Config>(&text).is_err(), "should reject: {bad}");
+            assert!(
+                toml::from_str::<Config>(&text).is_err(),
+                "should reject: {bad}"
+            );
         }
     }
 
@@ -1100,8 +1163,10 @@ mod tests {
     #[test]
     fn a_judge_pinned_to_an_excluded_provider_is_rejected() {
         let mut cfg = Config::default();
-        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
-        cfg.providers.push(sample_provider("openai", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("openai", ProviderKind::Api));
         cfg.judges.push(JudgeConfig {
             name: "pinned".into(),
             provider: Some("openai".into()),
@@ -1124,7 +1189,8 @@ mod tests {
     #[test]
     fn role_provider_must_exist() {
         let mut cfg = Config::default();
-        cfg.providers.push(sample_provider("anthropic", ProviderKind::Api));
+        cfg.providers
+            .push(sample_provider("anthropic", ProviderKind::Api));
         cfg.arena.judge = Some("nobody".into());
         assert!(cfg.validate().is_err());
         cfg.arena.judge = Some("anthropic".into());

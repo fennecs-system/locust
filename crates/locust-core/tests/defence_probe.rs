@@ -45,9 +45,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use locust_core::arena::{Arena, Event};
 use locust_core::bench::{classify, Case, Classified, Scorecard};
 use locust_core::config::{Config, JudgeConfig};
-use locust_core::arena::{Arena, Event};
 use locust_core::model::{AttackReport, Finding, Grounding, RawFinding, Stance, Verdict};
 use locust_provider::{Provider, Request, Response, SharedProvider, Usage};
 use std::path::{Path, PathBuf};
@@ -413,8 +413,12 @@ impl Seeded {
         let stance = format!("{stance:?}").to_lowercase();
         let mut out = Vec::new();
         for line in prompt.lines() {
-            let Some(rest) = line.trim().strip_prefix("**") else { continue };
-            let Some((id, _)) = rest.split_once("**") else { continue };
+            let Some(rest) = line.trim().strip_prefix("**") else {
+                continue;
+            };
+            let Some((id, _)) = rest.split_once("**") else {
+                continue;
+            };
             if !id.starts_with('f') || !id.contains('-') {
                 continue;
             }
@@ -453,9 +457,14 @@ impl Provider for Seeded {
         // `gen0-atk-*`, `gen0-def-*`, `gen0-judge0-*`. Anything not scripted
         // here, judging above all, must reach the real model.
         let scripted = if req.label.contains("-atk-") {
-            Some(self.attack.clone().unwrap_or_else(|| r#"{"findings":[]}"#.to_string()))
+            Some(
+                self.attack
+                    .clone()
+                    .unwrap_or_else(|| r#"{"findings":[]}"#.to_string()),
+            )
         } else if req.label.contains("-def-") {
-            self.defence.map(|stance| self.scripted_defence(stance, &req.prompt))
+            self.defence
+                .map(|stance| self.scripted_defence(stance, &req.prompt))
         } else {
             None
         };
@@ -490,20 +499,27 @@ fn probe_config(case: &Case) -> Result<Config> {
 }
 
 fn materialise(case: &Case, tag: &str) -> Result<PathBuf> {
-    let workdir =
-        std::env::temp_dir().join(format!("locust-probe-{}-{tag}", std::process::id()));
+    let workdir = std::env::temp_dir().join(format!("locust-probe-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&workdir)?;
     case.materialise(&workdir)
 }
 
-fn providers(cfg: &Config, claims: &[&Claim], defence: Option<Stance>) -> Result<Vec<SharedProvider>> {
+fn providers(
+    cfg: &Config,
+    claims: &[&Claim],
+    defence: Option<Stance>,
+) -> Result<Vec<SharedProvider>> {
     let mut out: Vec<SharedProvider> = Vec::new();
     for (i, pc) in cfg.active_providers().into_iter().enumerate() {
         let inner = pc.build_with(&cfg.sandbox)?;
         // Only the first provider raises the slate, so the panel still has a
         // vendor that authored nothing in front of it.
         let attack = (i == 0).then(|| attack_json(claims));
-        out.push(Arc::new(Seeded { inner, attack, defence }));
+        out.push(Arc::new(Seeded {
+            inner,
+            attack,
+            defence,
+        }));
     }
     Ok(out)
 }
@@ -529,7 +545,12 @@ fn responses(gen: &locust_core::model::GenerationOutcome, claims: &[&Claim]) -> 
         .iter()
         .map(|claim| {
             let Some(finding) = gen.findings.iter().find(|f| f.raw.title == claim.title) else {
-                return Outcome { stances: Vec::new(), panel: Vec::new(), verdict: None, dissent: 0.0 };
+                return Outcome {
+                    stances: Vec::new(),
+                    panel: Vec::new(),
+                    verdict: None,
+                    dissent: 0.0,
+                };
             };
             // A duplicate is answered under its cluster's canonical member.
             let answered = finding.duplicate_of.as_deref().unwrap_or(&finding.id);
@@ -579,7 +600,10 @@ async fn the_defence_answers_fixed_true_and_false_claims() -> Result<()> {
     println!(
         "probe: {} claims ({} true, {} false) over {} provider(s), {} defenders, {} judges",
         claims.len(),
-        claims.iter().filter(|c| c.answer == Answer::Concede).count(),
+        claims
+            .iter()
+            .filter(|c| c.answer == Answer::Concede)
+            .count(),
         claims.iter().filter(|c| c.answer == Answer::Refute).count(),
         provs.len(),
         cfg.arena.defenders,
@@ -645,12 +669,21 @@ async fn the_defence_answers_fixed_true_and_false_claims() -> Result<()> {
     // and the panel were actually exercised, because a run where the claims
     // never reached them says nothing either way.
     for (claim, answer) in claims.iter().zip(responses(gen, &claims)) {
-        assert!(!answer.stances.is_empty(), "no defender answered `{}`", claim.title);
+        assert!(
+            !answer.stances.is_empty(),
+            "no defender answered `{}`",
+            claim.title
+        );
         assert!(answer.verdict.is_some(), "no ruling for `{}`", claim.title);
     }
     assert!(
-        gen.rebuttals.iter().any(|r| r.raw.stance != Stance::Concede)
-            || gen.rulings.iter().any(|r| r.raw.verdict != Verdict::Confirmed),
+        gen.rebuttals
+            .iter()
+            .any(|r| r.raw.stance != Stance::Concede)
+            || gen
+                .rulings
+                .iter()
+                .any(|r| r.raw.verdict != Verdict::Confirmed),
         "every claim was conceded and confirmed, the false ones included: \
          the defence did nothing this run"
     );
@@ -676,9 +709,15 @@ async fn the_panel_is_tested_against_a_defence_that_concedes_everything() -> Res
         "panel probe: {} claims ({} true, {} false, {} arguable), \
          defence scripted to concede every one",
         claims.len(),
-        claims.iter().filter(|c| c.answer == Answer::Concede).count(),
+        claims
+            .iter()
+            .filter(|c| c.answer == Answer::Concede)
+            .count(),
         claims.iter().filter(|c| c.answer == Answer::Refute).count(),
-        claims.iter().filter(|c| c.answer == Answer::Arguable).count(),
+        claims
+            .iter()
+            .filter(|c| c.answer == Answer::Arguable)
+            .count(),
     );
 
     let mut arms = Vec::new();
@@ -695,15 +734,29 @@ async fn the_panel_is_tested_against_a_defence_that_concedes_everything() -> Res
         // failed to parse would leave the judges with no rebuttal at all,
         // which is a different experiment.
         assert!(
-            gen.rebuttals.iter().all(|r| r.raw.stance == Stance::Concede),
+            gen.rebuttals
+                .iter()
+                .all(|r| r.raw.stance == Stance::Concede),
             "{tag}: the scripted defence did not concede everything"
         );
-        assert!(!gen.rebuttals.is_empty(), "{tag}: no rebuttals reached the panel");
+        assert!(
+            !gen.rebuttals.is_empty(),
+            "{tag}: no rebuttals reached the panel"
+        );
 
-        arms.push((tag, judges, responses(gen, &claims), outcome.usage.cost_usd, Scorecard::build(&case, &outcome)));
+        arms.push((
+            tag,
+            judges,
+            responses(gen, &claims),
+            outcome.usage.cost_usd,
+            Scorecard::build(&case, &outcome),
+        ));
     }
 
-    println!("\n{:<41} {:<22} {:<22}", "claim (defence conceded all)", "panel of 3", "single judge");
+    println!(
+        "\n{:<41} {:<22} {:<22}",
+        "claim (defence conceded all)", "panel of 3", "single judge"
+    );
     for (i, claim) in claims.iter().enumerate() {
         let want = match claim.answer {
             Answer::Concede => "should confirm",
@@ -712,7 +765,15 @@ async fn the_panel_is_tested_against_a_defence_that_concedes_everything() -> Res
         };
         let cell = |arm: &(&str, usize, Vec<Outcome>, f64, Scorecard)| {
             let a = &arm.2[i];
-            format!("{} {}", verdict_name(a.verdict), if a.panel.len() > 1 { format!("[{}]", a.panel.join("/")) } else { String::new() })
+            format!(
+                "{} {}",
+                verdict_name(a.verdict),
+                if a.panel.len() > 1 {
+                    format!("[{}]", a.panel.join("/"))
+                } else {
+                    String::new()
+                }
+            )
         };
         println!(
             "{:<41} {:<22} {:<22} {want}",
@@ -727,9 +788,7 @@ async fn the_panel_is_tested_against_a_defence_that_concedes_everything() -> Res
         let held = claims
             .iter()
             .zip(answers)
-            .filter(|(c, a)| {
-                c.answer == Answer::Refute && a.verdict == Some(Verdict::Refuted)
-            })
+            .filter(|(c, a)| c.answer == Answer::Refute && a.verdict == Some(Verdict::Refuted))
             .count();
         let false_claims = claims.iter().filter(|c| c.answer == Answer::Refute).count();
         println!(
@@ -756,7 +815,11 @@ async fn the_panel_is_tested_against_a_defence_that_concedes_everything() -> Res
 
     for (tag, _, answers, _, _) in &arms {
         for (claim, answer) in claims.iter().zip(answers) {
-            assert!(answer.verdict.is_some(), "{tag}: no ruling for `{}`", claim.title);
+            assert!(
+                answer.verdict.is_some(),
+                "{tag}: no ruling for `{}`",
+                claim.title
+            );
         }
     }
     Ok(())

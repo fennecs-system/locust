@@ -149,7 +149,11 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("LOCUST_LOG").unwrap_or_else(|_| {
-                if cli.verbose { "locust=debug".into() } else { "locust=warn".into() }
+                if cli.verbose {
+                    "locust=debug".into()
+                } else {
+                    "locust=warn".into()
+                }
             }),
         )
         .with_writer(std::io::stderr)
@@ -161,11 +165,11 @@ async fn main() {
     // Without this an interrupted run leaves every in-flight agent running.
     #[cfg(unix)]
     tokio::spawn(async {
-        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
         let interrupted = tokio::select! {
             _ = tokio::signal::ctrl_c() => true,
             _ = term.recv() => true,
@@ -190,13 +194,30 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { force } => init::write_config(&repo, force),
 
-        Command::Bench { case, cases_dir, generations, attackers, json, list, replay } => {
+        Command::Bench {
+            case,
+            cases_dir,
+            generations,
+            attackers,
+            json,
+            list,
+            replay,
+        } => {
             if let Some(dir) = replay {
                 return replay_bench(&cases_dir, case.as_deref(), &dir, json);
             }
             let cfg = load_config(&cli.config, &repo)?;
-            bench(&cfg, &cases_dir, case.as_deref(), generations, attackers, json, list, cli.verbose)
-                .await
+            bench(
+                &cfg,
+                &cases_dir,
+                case.as_deref(),
+                generations,
+                attackers,
+                json,
+                list,
+                cli.verbose,
+            )
+            .await
         }
 
         Command::Clean => {
@@ -326,9 +347,14 @@ fn replay_bench(
         if depth == 0 {
             return;
         }
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        let mut dirs: Vec<PathBuf> =
-            entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
         dirs.sort();
         for d in dirs {
             collect(&d, depth - 1, out);
@@ -338,7 +364,10 @@ fn replay_bench(
     let mut reports: Vec<PathBuf> = Vec::new();
     collect(dir, 5, &mut reports);
     if reports.is_empty() {
-        bail!("no report.json under {} (searched five levels)", dir.display());
+        bail!(
+            "no report.json under {} (searched five levels)",
+            dir.display()
+        );
     }
 
     let cases = Case::discover(cases_dir)?;
@@ -346,8 +375,8 @@ fn replay_bench(
     for report in &reports {
         let text = std::fs::read_to_string(report)
             .with_context(|| format!("reading {}", report.display()))?;
-        let outcome: RunOutcome = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", report.display()))?;
+        let outcome: RunOutcome =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", report.display()))?;
 
         // `.locust/runs/<run-id>/report.json` sits four levels below the
         // repository the bench materialised, which is named for the case.
@@ -450,7 +479,10 @@ async fn bench(
             Ok(outcome) => cards.push(Scorecard::build(case, &outcome)),
             Err(e) => {
                 eprintln!("  {} {e:#}", term::red("failed"));
-                cards.push(Scorecard { case: case.manifest.name.clone(), ..Default::default() });
+                cards.push(Scorecard {
+                    case: case.manifest.name.clone(),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -475,10 +507,19 @@ fn print_scorecards(cards: &[locust_core::bench::Scorecard], json: bool) -> Resu
         println!(
             "{:<18} {:>10} {:>9.0}% {:>10} {:>8}",
             c.case,
-            format!("{}/{} ({:.0}%)", c.real_found.len(), c.real_planted, c.recall() * 100.0),
+            format!(
+                "{}/{} ({:.0}%)",
+                c.real_found.len(),
+                c.real_planted,
+                c.recall() * 100.0
+            ),
             c.defence_pushback() * 100.0,
             c.findings_confirmed,
-            if c.cost_usd > 0.0 { format!("${:.2}", c.cost_usd) } else { "—".into() },
+            if c.cost_usd > 0.0 {
+                format!("${:.2}", c.cost_usd)
+            } else {
+                "—".into()
+            },
         );
     }
 
@@ -548,7 +589,11 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
 
     println!("{}", term::bold("plan"));
     println!("  repo        {} ({})", vcs.root().display(), vcs.kind());
-    println!("  range       {}...{}", &range.merge_base[..8], &range.target[..8]);
+    println!(
+        "  range       {}...{}",
+        &range.merge_base[..8],
+        &range.target[..8]
+    );
     println!("  files       {} changed", pack.files.len());
     println!(
         "  context     {} bytes of diff, {} files inlined",
@@ -557,18 +602,34 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     );
     println!();
 
-    let provider_names: Vec<&str> =
-        cfg.active_providers().iter().map(|p| p.name.as_str()).collect();
+    let provider_names: Vec<&str> = cfg
+        .active_providers()
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     println!("  providers   {}", provider_names.join(", "));
     let panel = cfg.panel()?;
     println!(
         "  judges      {} ({})",
-        panel.iter().map(|j| format!("{} {}", j.name, j.traits)).collect::<Vec<_>>().join(", "),
-        cfg.arena.judge.as_deref().unwrap_or("rotating, excluding authors")
+        panel
+            .iter()
+            .map(|j| format!("{} {}", j.name, j.traits))
+            .collect::<Vec<_>>()
+            .join(", "),
+        cfg.arena
+            .judge
+            .as_deref()
+            .unwrap_or("rotating, excluding authors")
     );
     println!("  generations {}", cfg.run.generations);
-    println!("  population  {} attackers, {} defenders", cfg.arena.attackers, cfg.arena.defenders);
-    println!("  evolution   {}", locust_core::evolution::describe(&cfg.evolution));
+    println!(
+        "  population  {} attackers, {} defenders",
+        cfg.arena.attackers, cfg.arena.defenders
+    );
+    println!(
+        "  evolution   {}",
+        locust_core::evolution::describe(&cfg.evolution)
+    );
     println!();
 
     // Defender and judge call counts depend on how many findings appear, which
@@ -576,7 +637,9 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     let g = cfg.run.generations as usize;
     let attacks = cfg.arena.attackers * g;
     let assumed_findings = cfg.arena.attackers * 2;
-    let batches = assumed_findings.div_ceil(cfg.arena.judge_batch.max(1)).max(1);
+    let batches = assumed_findings
+        .div_ceil(cfg.arena.judge_batch.max(1))
+        .max(1);
     let defends = cfg.arena.defenders * batches * g;
     // Every judge on the panel rules on every batch.
     let judges = batches * g * panel.len().max(1);
@@ -590,18 +653,29 @@ fn plan(cfg: &Config, vcs: &dyn locust_vcs::Vcs) -> Result<()> {
     println!("{}", term::bold("estimated model calls"));
     println!("  attack      {attacks}");
     println!("  defend      ~{defends}");
-    println!("  judge       ~{judges}{}", if panel.len() > 1 {
-        format!("  ({} judges × ~{} batches × {g} generations)", panel.len(), batches)
-    } else {
-        String::new()
-    });
+    println!(
+        "  judge       ~{judges}{}",
+        if panel.len() > 1 {
+            format!(
+                "  ({} judges × ~{} batches × {g} generations)",
+                panel.len(),
+                batches
+            )
+        } else {
+            String::new()
+        }
+    );
     if breeding > 0 {
         println!("  breeding    {breeding}");
     }
     if synth > 0 {
         println!("  synthesis   {synth}");
     }
-    println!("  {}      ~{}", term::bold("total"), attacks + defends + judges + breeding + synth);
+    println!(
+        "  {}      ~{}",
+        term::bold("total"),
+        attacks + defends + judges + breeding + synth
+    );
     println!(
         "\n{}",
         term::dim("defend/judge counts assume ~2 findings per reviewer; actuals vary.")
@@ -614,7 +688,11 @@ fn providers(cfg: &Config) -> Result<()> {
     for pc in &cfg.providers {
         let status = match pc.build() {
             Ok(p) => format!("{} {}", term::green("ready"), term::dim(p.model())),
-            Err(e) => format!("{} {}", term::red("unavailable"), term::dim(&format!("{e}"))),
+            Err(e) => format!(
+                "{} {}",
+                term::red("unavailable"),
+                term::dim(&format!("{e}"))
+            ),
         };
         // A dot marks a provider that is configured but excluded from this run.
         let active = if cfg.active_providers().iter().any(|a| a.name == pc.name) {
@@ -622,12 +700,20 @@ fn providers(cfg: &Config) -> Result<()> {
         } else {
             term::dim("· ")
         };
-        println!("{active}{:<16} {:<5} {status}", pc.name, format!("{:?}", pc.kind).to_lowercase());
+        println!(
+            "{active}{:<16} {:<5} {status}",
+            pc.name,
+            format!("{:?}", pc.kind).to_lowercase()
+        );
     }
 
     // A CLI provider that is configured but not installed is the most common
     // way a run ends up with a silently smaller population.
-    for pc in cfg.providers.iter().filter(|p| p.kind == locust_core::config::ProviderKind::Cli) {
+    for pc in cfg
+        .providers
+        .iter()
+        .filter(|p| p.kind == locust_core::config::ProviderKind::Cli)
+    {
         if let Some(cmd) = pc.command.as_ref().and_then(|c| c.first()) {
             if locust_provider::cli::which(cmd).is_none() {
                 println!("  {} `{cmd}` is not on PATH", term::yellow("warn"));
@@ -641,7 +727,11 @@ fn judges(cfg: &Config, full: bool) -> Result<()> {
     use locust_core::traits::{Axis, Voice};
 
     let panel = cfg.panel()?;
-    let source = if cfg.judges.is_empty() { "built-in panel" } else { "from locust.toml" };
+    let source = if cfg.judges.is_empty() {
+        "built-in panel"
+    } else {
+        "from locust.toml"
+    };
     println!("{} {}", term::bold("judges"), term::dim(source));
 
     if panel.len() == 1 {
@@ -666,7 +756,10 @@ fn judges(cfg: &Config, full: bool) -> Result<()> {
         if full {
             let text = j.traits.render(Voice::Judge);
             if text.trim().is_empty() {
-                println!("\n      {}", term::dim("neutral — no temperament text is added"));
+                println!(
+                    "\n      {}",
+                    term::dim("neutral — no temperament text is added")
+                );
             } else {
                 println!();
                 for line in text.lines() {
@@ -678,7 +771,10 @@ fn judges(cfg: &Config, full: bool) -> Result<()> {
 
     println!(
         "\n{}",
-        term::dim(&format!("presets: {}", locust_core::Traits::PRESETS.join(", ")))
+        term::dim(&format!(
+            "presets: {}",
+            locust_core::Traits::PRESETS.join(", ")
+        ))
     );
     Ok(())
 }
@@ -702,14 +798,22 @@ fn personas(cfg: &Config, full: bool) -> Result<()> {
         } else {
             "built-in library"
         };
-        println!("\n{} {}", term::bold(&format!("{role:?}s").to_lowercase()), term::dim(source));
+        println!(
+            "\n{} {}",
+            term::bold(&format!("{role:?}s").to_lowercase()),
+            term::dim(source)
+        );
         for p in list {
             let temperament = if p.traits.is_neutral() {
                 String::new()
             } else {
                 format!("  {}", term::cyan(&p.traits.to_string()))
             };
-            println!("  {:<22} {}{temperament}", term::bold(&p.name), term::dim(&p.focus));
+            println!(
+                "  {:<22} {}{temperament}",
+                term::bold(&p.name),
+                term::dim(&p.focus)
+            );
             if full {
                 for line in p.prompt.lines() {
                     println!("      {line}");
@@ -731,8 +835,8 @@ fn report(repo: &std::path::Path, run: Option<&str>, render: bool) -> Result<()>
         let json = dir.join("report.json");
         let text = std::fs::read_to_string(&json)
             .with_context(|| format!("no run data at {}", json.display()))?;
-        let outcome: locust_core::RunOutcome = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", json.display()))?;
+        let outcome: locust_core::RunOutcome =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", json.display()))?;
         // The run's own config, so the rebuilt report matches how it was run.
         let cfg = Config::load(&dir.join("config.toml")).unwrap_or_default();
         println!("{}", locust_core::report::markdown(&outcome, &cfg));
@@ -740,8 +844,8 @@ fn report(repo: &std::path::Path, run: Option<&str>, render: bool) -> Result<()>
     }
 
     let md = dir.join("report.md");
-    let text = std::fs::read_to_string(&md)
-        .with_context(|| format!("no report at {}", md.display()))?;
+    let text =
+        std::fs::read_to_string(&md).with_context(|| format!("no report at {}", md.display()))?;
     println!("{text}");
     Ok(())
 }

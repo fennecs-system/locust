@@ -16,12 +16,33 @@ use tokio::sync::{Mutex, Semaphore};
 /// Progress, for whatever is driving the run.
 #[derive(Debug, Clone)]
 pub enum Event {
-    RunStarted { run_id: String, files: usize, generations: u32 },
-    GenerationStarted { generation: u32, total: u32, pressure: f64, personas: Vec<String> },
-    AgentStarted { label: String },
-    AgentFinished { label: String, produced: usize },
-    AgentFailed { label: String, error: String },
-    PhaseFinished { generation: u32, phase: &'static str, count: usize },
+    RunStarted {
+        run_id: String,
+        files: usize,
+        generations: u32,
+    },
+    GenerationStarted {
+        generation: u32,
+        total: u32,
+        pressure: f64,
+        personas: Vec<String>,
+    },
+    AgentStarted {
+        label: String,
+    },
+    AgentFinished {
+        label: String,
+        produced: usize,
+    },
+    AgentFailed {
+        label: String,
+        error: String,
+    },
+    PhaseFinished {
+        generation: u32,
+        phase: &'static str,
+        count: usize,
+    },
     GenerationFinished {
         generation: u32,
         confirmed: usize,
@@ -30,13 +51,23 @@ pub enum Event {
         contested: usize,
         top: Vec<Fitness>,
     },
-    Breeding { generation: u32 },
+    Breeding {
+        generation: u32,
+    },
     Synthesizing,
     /// Something that undermines the validity of the run's verdicts, raised
     /// while there is still time to act on it.
-    Warning { message: String },
-    BudgetReached { spent: f64, budget: f64 },
-    RunFinished { run_id: String, usage: Usage },
+    Warning {
+        message: String,
+    },
+    BudgetReached {
+        spent: f64,
+        budget: f64,
+    },
+    RunFinished {
+        run_id: String,
+        usage: Usage,
+    },
 }
 
 pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
@@ -131,7 +162,12 @@ impl Arena {
                 .unwrap_or_else(|| providers[0].clone())
         };
         let judge = pick(&cfg.arena.judge);
-        let meta = pick(&cfg.evolution.meta_provider.clone().or(cfg.arena.judge.clone()));
+        let meta = pick(
+            &cfg.evolution
+                .meta_provider
+                .clone()
+                .or(cfg.arena.judge.clone()),
+        );
         let synth = pick(&cfg.synthesis.provider.clone().or(cfg.arena.judge.clone()));
 
         let panel = cfg.panel()?;
@@ -166,10 +202,17 @@ impl Arena {
             .vcs
             .range(&self.cfg.run.base, &self.cfg.run.target)
             .with_context(|| {
-                format!("resolving `{}`...`{}`", self.cfg.run.base, self.cfg.run.target)
+                format!(
+                    "resolving `{}`...`{}`",
+                    self.cfg.run.base, self.cfg.run.target
+                )
             })?;
 
-        let pack = Arc::new(ContextPack::build(self.vcs.as_ref(), &range, &self.cfg.context)?);
+        let pack = Arc::new(ContextPack::build(
+            self.vcs.as_ref(),
+            &range,
+            &self.cfg.context,
+        )?);
         if pack.is_empty() {
             bail!(
                 "no reviewable changes between `{}` and `{}`",
@@ -189,7 +232,8 @@ impl Arena {
             self.warn(message).await;
         }
 
-        self.store.write_text("config.toml", &toml::to_string_pretty(&self.cfg)?)?;
+        self.store
+            .write_text("config.toml", &toml::to_string_pretty(&self.cfg)?)?;
         self.store.write_text("context.md", &pack.render(true))?;
 
         let mut attackers = self.cfg.seed_personas(Role::Attacker)?;
@@ -224,7 +268,11 @@ impl Arena {
                     // Earlier generations stand; stop here and report them.
                     Ok(aborted) => {
                         judging_aborted = aborted.phase == "judge";
-                        self.warn(format!("{aborted}; reporting the {} generation(s) that completed", generations.len())).await;
+                        self.warn(format!(
+                            "{aborted}; reporting the {} generation(s) that completed",
+                            generations.len()
+                        ))
+                        .await;
                         break;
                     }
                     Err(other) => return Err(other),
@@ -235,7 +283,11 @@ impl Arena {
                 if ruling.raw.verdict == Verdict::Undecided {
                     continue;
                 }
-                if let Some(f) = outcome.findings.iter().find(|f| f.id == ruling.raw.finding_id) {
+                if let Some(f) = outcome
+                    .findings
+                    .iter()
+                    .find(|f| f.id == ruling.raw.finding_id)
+                {
                     settled.push(SettledFinding {
                         location: f.location(),
                         title: f.raw.title.clone(),
@@ -255,12 +307,13 @@ impl Arena {
             // measuring the attackers' volume rather than their accuracy.
             if refuted == 0 && confirmed >= 4 {
                 self.warn(format!(
-                        "the panel refuted none of {confirmed} findings in generation {}. \
+                    "the panel refuted none of {confirmed} findings in generation {}. \
                          Either the change is genuinely this bad, or judging is not \
                          discriminating -- check a refutation you disagree with in the \
                          transcripts before trusting this generation's scores",
-                        generation + 1
-                    )).await;
+                    generation + 1
+                ))
+                .await;
             }
 
             (self.report)(Event::GenerationFinished {
@@ -282,7 +335,10 @@ impl Arena {
             // which is the worst of both outcomes.
             if !is_last && self.over_budget().await {
                 let spent = self.usage.lock().await.cost_usd;
-                (self.report)(Event::BudgetReached { spent, budget: self.cfg.run.budget_usd });
+                (self.report)(Event::BudgetReached {
+                    spent,
+                    budget: self.cfg.run.budget_usd,
+                });
                 generations.push(outcome);
                 break;
             }
@@ -302,8 +358,11 @@ impl Arena {
                     &outcome.rulings,
                     generation + 1,
                     next_pressure,
-                    ws.as_ref().map(|w| w.path.as_path()).unwrap_or(self.vcs.root()),
-                ).await;
+                    ws.as_ref()
+                        .map(|w| w.path.as_path())
+                        .unwrap_or(self.vcs.root()),
+                )
+                .await;
                 self.release(ws).await;
                 match brood {
                     Ok(brood) => {
@@ -356,7 +415,8 @@ impl Arena {
         outcome.elapsed_secs = started.elapsed().as_secs_f64();
 
         self.store.write_json("report.json", &outcome)?;
-        self.store.write_text("report.md", &crate::report::markdown(&outcome, &self.cfg))?;
+        self.store
+            .write_text("report.md", &crate::report::markdown(&outcome, &self.cfg))?;
 
         (self.report)(Event::RunFinished {
             run_id: self.store.run_id.clone(),
@@ -369,7 +429,10 @@ impl Arena {
         }
 
         if judging_aborted {
-            bail!("incomplete judgment; completed generations saved in {}", self.store.run_dir.display());
+            bail!(
+                "incomplete judgment; completed generations saved in {}",
+                self.store.run_dir.display()
+            );
         }
         Ok(outcome)
     }
@@ -428,13 +491,22 @@ impl Arena {
         let started = std::time::Instant::now();
         let dir = self.store.generation_dir(generation);
 
-        let attackers: Vec<&Persona> =
-            population.iter().filter(|p| p.role == Role::Attacker).collect();
-        let defenders: Vec<&Persona> =
-            population.iter().filter(|p| p.role == Role::Defender).collect();
+        let attackers: Vec<&Persona> = population
+            .iter()
+            .filter(|p| p.role == Role::Attacker)
+            .collect();
+        let defenders: Vec<&Persona> = population
+            .iter()
+            .filter(|p| p.role == Role::Defender)
+            .collect();
 
-        let Attacked { mut findings, failed, launched } =
-            self.attack(generation, total, pressure, pack, &attackers, settled).await;
+        let Attacked {
+            mut findings,
+            failed,
+            launched,
+        } = self
+            .attack(generation, total, pressure, pack, &attackers, settled)
+            .await;
 
         // A generation where every reviewer failed is not a clean review, it is
         // no review at all. Returning "0 findings" and exiting 0 would let a CI
@@ -456,10 +528,11 @@ impl Arena {
         }
         if failed * 2 >= launched && failed > 0 {
             self.warn(format!(
-                    "{failed} of {launched} reviewers failed in generation {}; the population \
+                "{failed} of {launched} reviewers failed in generation {}; the population \
                      was smaller than configured and the fitness scores reflect that",
-                    generation + 1
-                )).await;
+                generation + 1
+            ))
+            .await;
         }
         // Check every citation against the real file before anyone argues
         // about it, so the defender and the judge can both see when a reviewer
@@ -475,12 +548,17 @@ impl Arena {
         let ungrounded = findings.iter().filter(|f| !f.grounding.is_sound()).count();
         if ungrounded > 0 {
             self.warn(format!(
-                    "{ungrounded} of {} findings cite code that could not be located in the \
+                "{ungrounded} of {} findings cite code that could not be located in the \
                      target revision; they are marked for the defenders and the panel",
-                    findings.len()
-                )).await;
+                findings.len()
+            ))
+            .await;
         }
-        (self.report)(Event::PhaseFinished { generation, phase: "attack", count: findings.len() });
+        (self.report)(Event::PhaseFinished {
+            generation,
+            phase: "attack",
+            count: findings.len(),
+        });
 
         let rebuttals = {
             let canonical: Vec<&Finding> = findings.iter().filter(|f| f.is_canonical()).collect();
@@ -496,7 +574,15 @@ impl Arena {
         let judge_calls = JudgeCalls::default();
         let mut rulings = {
             let canonical: Vec<&Finding> = findings.iter().filter(|f| f.is_canonical()).collect();
-            self.judge(generation, pack, &canonical, &rebuttals, settled, &judge_calls).await
+            self.judge(
+                generation,
+                pack,
+                &canonical,
+                &rebuttals,
+                settled,
+                &judge_calls,
+            )
+            .await
         };
 
         // Nothing judged is not the same as nothing confirmed, but the report
@@ -523,27 +609,37 @@ impl Arena {
         let demoted = crate::dedup::apply_judge_duplicates(&mut findings, &rulings);
         if !demoted.is_empty() {
             rulings.retain(|r| !demoted.contains(&r.raw.finding_id));
-            tracing::debug!("judge merged {} finding(s) into existing clusters", demoted.len());
+            tracing::debug!(
+                "judge merged {} finding(s) into existing clusters",
+                demoted.len()
+            );
         }
-        (self.report)(Event::PhaseFinished { generation, phase: "judge", count: rulings.len() });
+        (self.report)(Event::PhaseFinished {
+            generation,
+            phase: "judge",
+            count: rulings.len(),
+        });
 
-        let fitness = scoring::score_generation(
-            &self.cfg.scoring,
-            population,
-            &findings,
-            &rulings,
-            pressure,
-        );
+        let fitness =
+            scoring::score_generation(&self.cfg.scoring, population, &findings, &rulings, pressure);
 
-        self.store.write_json(&format!("{dir}/personas.json"), &population)?;
-        self.store.write_json(&format!("{dir}/findings.json"), &findings)?;
-        self.store.write_json(&format!("{dir}/rebuttals.json"), &rebuttals)?;
-        self.store.write_json(&format!("{dir}/rulings.json"), &rulings)?;
-        self.store.write_json(&format!("{dir}/fitness.json"), &fitness)?;
+        self.store
+            .write_json(&format!("{dir}/personas.json"), &population)?;
+        self.store
+            .write_json(&format!("{dir}/findings.json"), &findings)?;
+        self.store
+            .write_json(&format!("{dir}/rebuttals.json"), &rebuttals)?;
+        self.store
+            .write_json(&format!("{dir}/rulings.json"), &rulings)?;
+        self.store
+            .write_json(&format!("{dir}/fitness.json"), &fitness)?;
 
-        let missing: Vec<&str> = findings.iter().filter(|f| f.is_canonical())
+        let missing: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.is_canonical())
             .filter(|f| !rulings.iter().any(|r| r.raw.finding_id == f.id))
-            .map(|f| f.id.as_str()).collect();
+            .map(|f| f.id.as_str())
+            .collect();
         if !missing.is_empty() {
             // Typed, not a plain `bail!`. The run loop downcasts this to decide
             // whether earlier generations are still worth writing out; an
@@ -619,7 +715,11 @@ impl Arena {
                 // Held across the checkout as well as the call: a run with
                 // parallelism 2 and six reviewers should have two worktrees on
                 // disk, not six.
-                let _permit = self.gate.acquire().await.expect("semaphore is never closed");
+                let _permit = self
+                    .gate
+                    .acquire()
+                    .await
+                    .expect("semaphore is never closed");
                 let has_ws = prompts::wants_workspace(&self.cfg, provider.needs_workspace());
                 let ws = self.workspace(&label, has_ws).await;
                 let prompt = prompts::attack(
@@ -698,7 +798,11 @@ impl Arena {
         let launched = results.len();
         let failed = results.iter().filter(|(_, ok)| !ok).count();
         let findings = results.into_iter().flat_map(|(f, _)| f).collect();
-        Attacked { findings, failed, launched }
+        Attacked {
+            findings,
+            failed,
+            launched,
+        }
     }
 
     async fn defend(
@@ -732,7 +836,11 @@ impl Arena {
                 let batch: Vec<Finding> = batch.iter().map(|f| (*f).clone()).collect();
 
                 tasks.push(async move {
-                    let _permit = self.gate.acquire().await.expect("semaphore is never closed");
+                    let _permit = self
+                        .gate
+                        .acquire()
+                        .await
+                        .expect("semaphore is never closed");
                     let has_ws = prompts::wants_workspace(&self.cfg, provider.needs_workspace());
                     let ws = self.workspace(&label, has_ws).await;
                     let refs: Vec<&Finding> = batch.iter().collect();
@@ -786,7 +894,11 @@ impl Arena {
             }
         }
 
-        futures::future::join_all(tasks).await.into_iter().flatten().collect()
+        futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Rule on each batch with every judge on the panel, then aggregate.
@@ -848,10 +960,15 @@ impl Arena {
                     .collect();
 
                 tasks.push(async move {
-                    let _permit =
-                        self.gate.acquire().await.expect("semaphore is never closed");
-                    let borrowed: Vec<(&Finding, Vec<&Rebuttal>)> =
-                        cases.iter().map(|(f, rs)| (f, rs.iter().collect())).collect();
+                    let _permit = self
+                        .gate
+                        .acquire()
+                        .await
+                        .expect("semaphore is never closed");
+                    let borrowed: Vec<(&Finding, Vec<&Rebuttal>)> = cases
+                        .iter()
+                        .map(|(f, rs)| (f, rs.iter().collect()))
+                        .collect();
                     let prompt = prompts::judge(&pack, &borrowed, &settled, &judge);
                     // Adjudication is not ideation: cold by default, nudged only
                     // by the judge's own temperament.
@@ -859,7 +976,14 @@ impl Arena {
                     let wanted = prompts::wants_workspace(&self.cfg, provider.needs_workspace());
                     let ws = self.workspace(&label, wanted).await;
                     let out = self
-                        .call(&provider, &label, &prompt.system, &prompt.user, temperature, ws.as_ref())
+                        .call(
+                            &provider,
+                            &label,
+                            &prompt.system,
+                            &prompt.user,
+                            temperature,
+                            ws.as_ref(),
+                        )
                         .await;
                     self.release(ws).await;
 
@@ -897,18 +1021,27 @@ impl Arena {
 
                     if ok && seen.len() != valid.len() {
                         ok = false;
-                        let mut missing: Vec<&str> = valid.iter().copied()
-                            .filter(|id| !seen.contains(*id)).collect();
+                        let mut missing: Vec<&str> = valid
+                            .iter()
+                            .copied()
+                            .filter(|id| !seen.contains(*id))
+                            .collect();
                         missing.sort_unstable();
                         let error = format!("incomplete judgment: missing {}", missing.join(", "));
                         self.warn(format!("{label}: {error}")).await;
-                        (self.report)(Event::AgentFailed { label: label.clone(), error });
+                        (self.report)(Event::AgentFailed {
+                            label: label.clone(),
+                            error,
+                        });
                         // A partial batch is a failed call, not a smaller panel
                         // selected separately by the judge for each finding.
                         votes.clear();
                     }
                     if ok {
-                        (self.report)(Event::AgentFinished { label, produced: votes.len() });
+                        (self.report)(Event::AgentFinished {
+                            label,
+                            produced: votes.len(),
+                        });
                     }
                     (votes, ok)
                 });
@@ -918,8 +1051,7 @@ impl Arena {
         let results = futures::future::join_all(tasks).await;
         let calls = results.len();
         let failed = results.iter().filter(|(_, ok)| !ok).count();
-        let votes: Vec<JudgeVote> =
-            results.into_iter().flat_map(|(v, _)| v).collect();
+        let votes: Vec<JudgeVote> = results.into_iter().flat_map(|(v, _)| v).collect();
         judge_calls.set(calls, failed);
 
         // A judge that errored is absent, not agreeing. Left unsaid, a panel of
@@ -928,23 +1060,29 @@ impl Arena {
         // a measurement of a smaller panel than was configured.
         if failed > 0 {
             self.warn(format!(
-                    "{failed} of {calls} judge calls failed in generation {}; affected findings \
+                "{failed} of {calls} judge calls failed in generation {}; affected findings \
                      were ruled by a smaller panel than configured, so their agreement figures \
                      are over the judges that answered",
-                    generation + 1
-                )).await;
+                generation + 1
+            ))
+            .await;
         }
 
         // Group by finding, preserving the order the findings came in so the
         // report is stable across runs.
         let mut grouped: HashMap<&str, Vec<JudgeVote>> = HashMap::new();
         for v in &votes {
-            grouped.entry(v.raw.finding_id.as_str()).or_default().push(v.clone());
+            grouped
+                .entry(v.raw.finding_id.as_str())
+                .or_default()
+                .push(v.clone());
         }
 
         let mut rulings = Vec::new();
         for f in canonical {
-            let Some(votes) = grouped.remove(f.id.as_str()) else { continue };
+            let Some(votes) = grouped.remove(f.id.as_str()) else {
+                continue;
+            };
             if let Some(ruling) = Ruling::from_panel(&f.id, generation, votes) {
                 rulings.push(ruling);
             }
@@ -976,8 +1114,11 @@ impl Arena {
         }
         let authors: std::collections::HashSet<&str> =
             batch.iter().map(|f| f.provider.as_str()).collect();
-        let neutral: Vec<&SharedProvider> =
-            self.providers.iter().filter(|p| !authors.contains(p.name())).collect();
+        let neutral: Vec<&SharedProvider> = self
+            .providers
+            .iter()
+            .filter(|p| !authors.contains(p.name()))
+            .collect();
         match neutral.len() {
             0 => self.providers[rotation % self.providers.len()].clone(),
             n => neutral[rotation % n].clone(),
@@ -990,11 +1131,22 @@ impl Arena {
             return Ok(Vec::new());
         }
         let prompt = prompts::synthesize(pack, &confirmed, self.cfg.synthesis.max_themes);
-        let _permit = self.gate.acquire().await.expect("semaphore is never closed");
+        let _permit = self
+            .gate
+            .acquire()
+            .await
+            .expect("semaphore is never closed");
         let wanted = prompts::wants_workspace(&self.cfg, self.synth.needs_workspace());
         let ws = self.workspace("synthesis", wanted).await;
         let text = self
-            .call(&self.synth, "synthesis", &prompt.system, &prompt.user, 0.3, ws.as_ref())
+            .call(
+                &self.synth,
+                "synthesis",
+                &prompt.system,
+                &prompt.user,
+                0.3,
+                ws.as_ref(),
+            )
             .await;
         self.release(ws).await;
         let text = text?;
@@ -1016,12 +1168,17 @@ impl Arena {
         temperature: f32,
         workspace: Option<&Workspace>,
     ) -> Result<String> {
-        (self.report)(Event::AgentStarted { label: label.to_string() });
+        (self.report)(Event::AgentStarted {
+            label: label.to_string(),
+        });
 
         let req = Request::new(label, system, user)
             .temperature(temperature)
-            .in_workspace(Some(workspace.map(|w| w.path.clone())
-                .unwrap_or_else(|| self.vcs.root().to_path_buf())));
+            .in_workspace(Some(
+                workspace
+                    .map(|w| w.path.clone())
+                    .unwrap_or_else(|| self.vcs.root().to_path_buf()),
+            ));
 
         let started = std::time::Instant::now();
         let result = provider.complete(req).await;

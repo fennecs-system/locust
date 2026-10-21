@@ -37,7 +37,10 @@ pub fn cluster(findings: &mut [Finding]) {
     let mut canonicals: Vec<usize> = Vec::new();
 
     for &i in &order {
-        let found = canonicals.iter().copied().find(|&c| same_defect(&findings[c], &findings[i]));
+        let found = canonicals
+            .iter()
+            .copied()
+            .find(|&c| same_defect(&findings[c], &findings[i]));
         match found {
             Some(c) => {
                 canonical_of.insert(i, c);
@@ -52,7 +55,10 @@ pub fn cluster(findings: &mut [Finding]) {
     // Distinct providers per cluster.
     let mut providers: HashMap<usize, HashSet<String>> = HashMap::new();
     for (&i, &c) in &canonical_of {
-        providers.entry(c).or_default().insert(findings[i].provider.clone());
+        providers
+            .entry(c)
+            .or_default()
+            .insert(findings[i].provider.clone());
     }
 
     let cluster_ids: HashMap<usize, String> = canonicals
@@ -65,7 +71,11 @@ pub fn cluster(findings: &mut [Finding]) {
         let corroboration = providers.get(&c).map(|p| p.len()).unwrap_or(1);
         findings[i].cluster = cluster_ids[&c].clone();
         findings[i].corroboration = corroboration;
-        findings[i].duplicate_of = if c == i { None } else { Some(findings[c].id.clone()) };
+        findings[i].duplicate_of = if c == i {
+            None
+        } else {
+            Some(findings[c].id.clone())
+        };
     }
 }
 
@@ -80,7 +90,10 @@ pub fn apply_judge_duplicates(findings: &mut [Finding], rulings: &[Ruling]) -> H
     let claimed: HashMap<&str, &str> = rulings
         .iter()
         .filter_map(|r| {
-            r.raw.duplicate_of.as_deref().map(|target| (r.raw.finding_id.as_str(), target))
+            r.raw
+                .duplicate_of
+                .as_deref()
+                .map(|target| (r.raw.finding_id.as_str(), target))
         })
         // A case cannot be a duplicate of itself, however the judge phrases it.
         .filter(|(id, target)| id != target)
@@ -91,8 +104,11 @@ pub fn apply_judge_duplicates(findings: &mut [Finding], rulings: &[Ruling]) -> H
 
     // Owned keys: the mutation pass below needs `findings` mutably while this
     // lookup is still live.
-    let index: HashMap<String, usize> =
-        findings.iter().enumerate().map(|(i, f)| (f.id.clone(), i)).collect();
+    let index: HashMap<String, usize> = findings
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id.clone(), i))
+        .collect();
 
     // Follow chains (A→B→C) to the end, refusing to loop. The judge can emit
     // a cycle, and a cycle would otherwise erase every finding in it.
@@ -122,7 +138,9 @@ pub fn apply_judge_duplicates(findings: &mut [Finding], rulings: &[Ruling]) -> H
         if target == *id {
             continue;
         }
-        let Some(&t) = index.get(target.as_str()) else { continue };
+        let Some(&t) = index.get(target.as_str()) else {
+            continue;
+        };
         if !findings[t].is_canonical() {
             continue;
         }
@@ -156,7 +174,10 @@ pub fn apply_judge_duplicates(findings: &mut [Finding], rulings: &[Ruling]) -> H
 fn recount_corroboration(findings: &mut [Finding]) {
     let mut providers: HashMap<String, HashSet<String>> = HashMap::new();
     for f in findings.iter() {
-        providers.entry(f.cluster.clone()).or_default().insert(f.provider.clone());
+        providers
+            .entry(f.cluster.clone())
+            .or_default()
+            .insert(f.provider.clone());
     }
     for f in findings.iter_mut() {
         f.corroboration = providers.get(&f.cluster).map(|p| p.len()).unwrap_or(1);
@@ -218,7 +239,14 @@ mod tests {
     use super::*;
     use crate::model::{RawFinding, Severity};
 
-    fn finding(id: &str, provider: &str, file: &str, line: Option<u32>, title: &str, conf: f32) -> Finding {
+    fn finding(
+        id: &str,
+        provider: &str,
+        file: &str,
+        line: Option<u32>,
+        title: &str,
+        conf: f32,
+    ) -> Finding {
         Finding {
             id: id.into(),
             generation: 0,
@@ -247,8 +275,22 @@ mod tests {
     #[test]
     fn same_bug_from_two_vendors_collapses_and_counts_corroboration() {
         let mut fs = vec![
-            finding("f1", "anthropic", "src/pool.rs", Some(40), "connection returned to pool without resetting transaction state", 0.9),
-            finding("f2", "openai", "src/pool.rs", Some(44), "transaction state not reset before connection is returned to the pool", 0.7),
+            finding(
+                "f1",
+                "anthropic",
+                "src/pool.rs",
+                Some(40),
+                "connection returned to pool without resetting transaction state",
+                0.9,
+            ),
+            finding(
+                "f2",
+                "openai",
+                "src/pool.rs",
+                Some(44),
+                "transaction state not reset before connection is returned to the pool",
+                0.7,
+            ),
         ];
         cluster(&mut fs);
         assert_eq!(fs[0].cluster, fs[1].cluster);
@@ -261,8 +303,22 @@ mod tests {
     #[test]
     fn same_vendor_twice_is_not_corroboration() {
         let mut fs = vec![
-            finding("f1", "anthropic", "src/pool.rs", Some(40), "connection returned to pool without resetting transaction state", 0.9),
-            finding("f2", "anthropic", "src/pool.rs", Some(41), "connection returned to pool without resetting transaction state", 0.8),
+            finding(
+                "f1",
+                "anthropic",
+                "src/pool.rs",
+                Some(40),
+                "connection returned to pool without resetting transaction state",
+                0.9,
+            ),
+            finding(
+                "f2",
+                "anthropic",
+                "src/pool.rs",
+                Some(41),
+                "connection returned to pool without resetting transaction state",
+                0.8,
+            ),
         ];
         cluster(&mut fs);
         assert_eq!(fs[0].corroboration, 1);
@@ -271,8 +327,22 @@ mod tests {
     #[test]
     fn different_defects_in_one_file_stay_apart() {
         let mut fs = vec![
-            finding("f1", "anthropic", "src/pool.rs", Some(40), "transaction state is not reset on release", 0.9),
-            finding("f2", "openai", "src/pool.rs", Some(300), "idle timeout is compared in seconds against a millisecond value", 0.8),
+            finding(
+                "f1",
+                "anthropic",
+                "src/pool.rs",
+                Some(40),
+                "transaction state is not reset on release",
+                0.9,
+            ),
+            finding(
+                "f2",
+                "openai",
+                "src/pool.rs",
+                Some(300),
+                "idle timeout is compared in seconds against a millisecond value",
+                0.8,
+            ),
         ];
         cluster(&mut fs);
         assert_ne!(fs[0].cluster, fs[1].cluster);
@@ -314,13 +384,28 @@ mod tests {
     #[test]
     fn judge_merges_what_token_overlap_cannot() {
         let mut fs = vec![
-            finding("f1", "anthropic", "src/cache.py", Some(20),
-                "expiry in get deletes from entries but not hits so evict raises KeyError", 0.9),
-            finding("f2", "openai", "src/cache.py", Some(35),
-                "evict can pick a key absent from entries and raise KeyError", 0.8),
+            finding(
+                "f1",
+                "anthropic",
+                "src/cache.py",
+                Some(20),
+                "expiry in get deletes from entries but not hits so evict raises KeyError",
+                0.9,
+            ),
+            finding(
+                "f2",
+                "openai",
+                "src/cache.py",
+                Some(35),
+                "evict can pick a key absent from entries and raise KeyError",
+                0.8,
+            ),
         ];
         cluster(&mut fs);
-        assert_ne!(fs[0].cluster, fs[1].cluster, "lexical clustering leaves these apart");
+        assert_ne!(
+            fs[0].cluster, fs[1].cluster,
+            "lexical clustering leaves these apart"
+        );
 
         let demoted = apply_judge_duplicates(&mut fs, &[ruling_dup("f2", Some("f1"))]);
 
@@ -335,7 +420,14 @@ mod tests {
     fn a_duplicate_cycle_from_the_judge_erases_nothing() {
         let mut fs = vec![
             finding("f1", "a", "x.rs", Some(1), "alpha claim here", 0.9),
-            finding("f2", "b", "x.rs", Some(90), "entirely separate beta assertion", 0.8),
+            finding(
+                "f2",
+                "b",
+                "x.rs",
+                Some(90),
+                "entirely separate beta assertion",
+                0.8,
+            ),
         ];
         cluster(&mut fs);
         // The judge says each is a duplicate of the other.
@@ -353,7 +445,10 @@ mod tests {
         cluster(&mut fs);
         let demoted = apply_judge_duplicates(
             &mut fs,
-            &[ruling_dup("f1", Some("f1")), ruling_dup("f1", Some("nonexistent"))],
+            &[
+                ruling_dup("f1", Some("f1")),
+                ruling_dup("f1", Some("nonexistent")),
+            ],
         );
         assert!(demoted.is_empty());
         assert!(fs[0].is_canonical());
@@ -362,12 +457,36 @@ mod tests {
     #[test]
     fn a_chain_of_duplicates_collapses_to_one_canonical() {
         let mut fs = vec![
-            finding("f1", "a", "x.rs", Some(1), "first distinct wording alpha", 0.9),
-            finding("f2", "b", "x.rs", Some(90), "second distinct wording beta", 0.8),
-            finding("f3", "c", "x.rs", Some(180), "third distinct wording gamma", 0.7),
+            finding(
+                "f1",
+                "a",
+                "x.rs",
+                Some(1),
+                "first distinct wording alpha",
+                0.9,
+            ),
+            finding(
+                "f2",
+                "b",
+                "x.rs",
+                Some(90),
+                "second distinct wording beta",
+                0.8,
+            ),
+            finding(
+                "f3",
+                "c",
+                "x.rs",
+                Some(180),
+                "third distinct wording gamma",
+                0.7,
+            ),
         ];
         cluster(&mut fs);
-        assert!(fs.iter().all(|f| f.is_canonical()), "all distinct lexically");
+        assert!(
+            fs.iter().all(|f| f.is_canonical()),
+            "all distinct lexically"
+        );
 
         // f3 -> f2 -> f1
         let demoted = apply_judge_duplicates(
@@ -378,7 +497,10 @@ mod tests {
         let canonical: Vec<&Finding> = fs.iter().filter(|f| f.is_canonical()).collect();
         assert_eq!(canonical.len(), 1);
         assert_eq!(canonical[0].id, "f1");
-        assert_eq!(canonical[0].corroboration, 3, "three vendors reached one defect");
+        assert_eq!(
+            canonical[0].corroboration, 3,
+            "three vendors reached one defect"
+        );
     }
 
     #[test]
@@ -388,10 +510,16 @@ mod tests {
             finding("f2", "b", "y.rs", Some(1), "beta claim there", 0.8),
         ];
         cluster(&mut fs);
-        let before: Vec<_> = fs.iter().map(|f| (f.cluster.clone(), f.corroboration)).collect();
+        let before: Vec<_> = fs
+            .iter()
+            .map(|f| (f.cluster.clone(), f.corroboration))
+            .collect();
         let demoted = apply_judge_duplicates(&mut fs, &[ruling_dup("f1", None)]);
         assert!(demoted.is_empty());
-        let after: Vec<_> = fs.iter().map(|f| (f.cluster.clone(), f.corroboration)).collect();
+        let after: Vec<_> = fs
+            .iter()
+            .map(|f| (f.cluster.clone(), f.corroboration))
+            .collect();
         assert_eq!(before, after);
     }
 

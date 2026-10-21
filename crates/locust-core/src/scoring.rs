@@ -21,8 +21,10 @@ pub fn score_generation(
     rulings: &[Ruling],
     pressure: f64,
 ) -> Vec<Fitness> {
-    let by_id: HashMap<&str, &Ruling> =
-        rulings.iter().map(|r| (r.raw.finding_id.as_str(), r)).collect();
+    let by_id: HashMap<&str, &Ruling> = rulings
+        .iter()
+        .map(|r| (r.raw.finding_id.as_str(), r))
+        .collect();
 
     let mut out: Vec<Fitness> = personas
         .iter()
@@ -33,8 +35,11 @@ pub fn score_generation(
             ..Default::default()
         })
         .collect();
-    let mut index: HashMap<&str, usize> =
-        personas.iter().enumerate().map(|(i, p)| (p.id.as_str(), i)).collect();
+    let mut index: HashMap<&str, usize> = personas
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id.as_str(), i))
+        .collect();
     // Defenders raise nothing, so they will not appear below; that is fine.
     index.shrink_to_fit();
 
@@ -42,7 +47,9 @@ pub fn score_generation(
     let mut altitude_n: Vec<usize> = vec![0; out.len()];
 
     for f in findings {
-        let Some(&i) = index.get(f.persona_id.as_str()) else { continue };
+        let Some(&i) = index.get(f.persona_id.as_str()) else {
+            continue;
+        };
         out[i].raised += 1;
 
         // Charged whatever the verdict: citing code that is not there is a
@@ -98,8 +105,11 @@ pub fn score_generation(
         match ruling.raw.verdict {
             Verdict::Confirmed => {
                 out[i].confirmed += 1;
-                let severity_w =
-                    if cfg.severity_weighted { ruling.raw.severity.weight() } else { 1.0 };
+                let severity_w = if cfg.severity_weighted {
+                    ruling.raw.severity.weight()
+                } else {
+                    1.0
+                };
                 // A finding two of three judges refused is worth less than one
                 // the whole panel backed. Without this the panel is just a
                 // majority vote and the spread it measures is thrown away.
@@ -125,12 +135,23 @@ pub fn score_generation(
 
     for (i, f) in out.iter_mut().enumerate() {
         let decided = f.confirmed + f.refuted;
-        f.precision = if decided == 0 { 0.0 } else { f.confirmed as f64 / decided as f64 };
-        f.mean_altitude =
-            if altitude_n[i] == 0 { 0.0 } else { altitude_sum[i] / altitude_n[i] as f64 };
+        f.precision = if decided == 0 {
+            0.0
+        } else {
+            f.confirmed as f64 / decided as f64
+        };
+        f.mean_altitude = if altitude_n[i] == 0 {
+            0.0
+        } else {
+            altitude_sum[i] / altitude_n[i] as f64
+        };
     }
 
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -209,7 +230,10 @@ mod tests {
     }
 
     fn contested(id: &str, verdict: Verdict, altitude: Altitude, dissent: f64) -> Ruling {
-        Ruling { dissent, ..ruling(id, verdict, altitude) }
+        Ruling {
+            dissent,
+            ..ruling(id, verdict, altitude)
+        }
     }
 
     #[test]
@@ -295,8 +319,11 @@ mod tests {
         let cfg = ScoringConfig::default();
         let ps = vec![persona("a"), persona("b"), persona("c")];
         for verdict in [Verdict::Confirmed, Verdict::Refuted] {
-            let mut fs = vec![finding("a", "a", Altitude::Local),
-                finding("b", "b", Altitude::Local), finding("c", "c", Altitude::Local)];
+            let mut fs = vec![
+                finding("a", "a", Altitude::Local),
+                finding("b", "b", Altitude::Local),
+                finding("c", "c", Altitude::Local),
+            ];
             fs[0].raw.title = "identical claim about a shared resource".into();
             fs[1].raw.title = fs[0].raw.title.clone();
             fs[2].raw.title = "distinct wording describing another symptom".into();
@@ -387,26 +414,47 @@ mod tests {
         let ps = vec![persona("p")];
         let findings = vec![finding("f1", "p", Altitude::Local)];
 
-        let unanimous =
-            score_generation(&cfg, &ps, &findings, &[ruling("f1", Verdict::Confirmed, Altitude::Local)], 0.5);
+        let unanimous = score_generation(
+            &cfg,
+            &ps,
+            &findings,
+            &[ruling("f1", Verdict::Confirmed, Altitude::Local)],
+            0.5,
+        );
         let split = score_generation(
             &cfg,
             &ps,
             &findings,
-            &[contested("f1", Verdict::Confirmed, Altitude::Local, 1.0 / 3.0)],
+            &[contested(
+                "f1",
+                Verdict::Confirmed,
+                Altitude::Local,
+                1.0 / 3.0,
+            )],
             0.5,
         );
         assert!(split[0].score < unanimous[0].score);
-        assert!(split[0].score > 0.0, "a contested confirmation still counts for something");
+        assert!(
+            split[0].score > 0.0,
+            "a contested confirmation still counts for something"
+        );
     }
 
     #[test]
     fn consensus_weight_zero_restores_single_judge_behaviour() {
-        let cfg = ScoringConfig { consensus_weight: 0.0, ..ScoringConfig::default() };
+        let cfg = ScoringConfig {
+            consensus_weight: 0.0,
+            ..ScoringConfig::default()
+        };
         let ps = vec![persona("p")];
         let findings = vec![finding("f1", "p", Altitude::Local)];
-        let unanimous =
-            score_generation(&cfg, &ps, &findings, &[ruling("f1", Verdict::Confirmed, Altitude::Local)], 0.5);
+        let unanimous = score_generation(
+            &cfg,
+            &ps,
+            &findings,
+            &[ruling("f1", Verdict::Confirmed, Altitude::Local)],
+            0.5,
+        );
         let split = score_generation(
             &cfg,
             &ps,
@@ -432,7 +480,10 @@ mod tests {
         let base = score_generation(&off, &ps, &findings, &rulings, 0.5);
         assert_eq!(base[0].ungrounded, 1, "still counted and reported");
 
-        let on = ScoringConfig { ungrounded_penalty: -2.0, ..ScoringConfig::default() };
+        let on = ScoringConfig {
+            ungrounded_penalty: -2.0,
+            ..ScoringConfig::default()
+        };
         let charged = score_generation(&on, &ps, &findings, &rulings, 0.5);
         assert!(charged[0].score < base[0].score);
         assert!((base[0].score - charged[0].score - 2.0).abs() < 1e-9);
@@ -440,7 +491,10 @@ mod tests {
 
     #[test]
     fn a_sound_citation_is_never_charged() {
-        let cfg = ScoringConfig { ungrounded_penalty: -5.0, ..ScoringConfig::default() };
+        let cfg = ScoringConfig {
+            ungrounded_penalty: -5.0,
+            ..ScoringConfig::default()
+        };
         let ps = vec![persona("p")];
         let findings = vec![finding("f1", "p", Altitude::Local)];
         let rulings = vec![ruling("f1", Verdict::Confirmed, Altitude::Local)];

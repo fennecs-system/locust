@@ -46,7 +46,10 @@ pub async fn breed(
     // implicitly (a defender that refutes well shrinks everyone's score) but
     // their fitness is not separable from the attackers they faced, so
     // evolving them on this signal would be fitting noise.
-    let attackers: Vec<&Persona> = current.iter().filter(|p| p.role == Role::Attacker).collect();
+    let attackers: Vec<&Persona> = current
+        .iter()
+        .filter(|p| p.role == Role::Attacker)
+        .collect();
     let fit_by_id: HashMap<&str, &Fitness> =
         fitness.iter().map(|f| (f.persona_id.as_str(), f)).collect();
 
@@ -66,15 +69,24 @@ pub async fn breed(
             (*p, f)
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    let survivors: Vec<&(&Persona, Fitness)> =
-        ranked.iter().filter(|(_, f)| f.score > ev.cull_below).collect();
+    let survivors: Vec<&(&Persona, Fitness)> = ranked
+        .iter()
+        .filter(|(_, f)| f.score > ev.cull_below)
+        .collect();
     // If the cull would empty the population, keep the best regardless: a
     // generation where every persona scored badly is information, not a reason
     // to stop reviewing.
-    let pool: Vec<&(&Persona, Fitness)> =
-        if survivors.is_empty() { ranked.iter().take(2).collect() } else { survivors };
+    let pool: Vec<&(&Persona, Fitness)> = if survivors.is_empty() {
+        ranked.iter().take(2).collect()
+    } else {
+        survivors
+    };
 
     let mut next: Vec<Persona> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -126,7 +138,14 @@ pub async fn breed(
         let (p, f) = pool[(ev.elite + k) % pool.len()];
         let evidence = evidence_for(p, findings, rulings);
         let prompt = prompts::mutate(p, f, &evidence, pressure);
-        match call_meta(meta, &prompt, &format!("gen{next_generation}/mutate/{}", p.id), workspace).await {
+        match call_meta(
+            meta,
+            &prompt,
+            &format!("gen{next_generation}/mutate/{}", p.id),
+            workspace,
+        )
+        .await
+        {
             Ok((spec, u)) => {
                 usage.merge(&u);
                 // Temperament is inherited: the meta-prompt rewrites prose,
@@ -146,7 +165,9 @@ pub async fn breed(
             // Leave the slot empty rather than cloning the parent into it; the
             // immigrant and backfill steps below will fill it with something
             // that is at least a different point of view.
-            Err(e) => tracing::warn!(persona = %p.name, "mutation failed, leaving the slot to backfill: {e}"),
+            Err(e) => {
+                tracing::warn!(persona = %p.name, "mutation failed, leaving the slot to backfill: {e}")
+            }
         }
     }
 
@@ -161,7 +182,14 @@ pub async fn breed(
             let pair = ((*a.0).clone(), a.1.clone());
             let pair_b = ((*b.0).clone(), b.1.clone());
             let prompt = prompts::crossover(&pair, &pair_b);
-            match call_meta(meta, &prompt, &format!("gen{next_generation}/crossover/{i}"), workspace).await {
+            match call_meta(
+                meta,
+                &prompt,
+                &format!("gen{next_generation}/crossover/{i}"),
+                workspace,
+            )
+            .await
+            {
                 Ok((spec, u)) => {
                     usage.merge(&u);
                     let child = from_spec(
@@ -229,7 +257,10 @@ pub async fn breed(
     next.extend(carry_defenders(cfg, current, next_generation));
     dedupe_ids(&mut next);
 
-    Ok(Brood { personas: next, usage })
+    Ok(Brood {
+        personas: next,
+        usage,
+    })
 }
 
 /// Defenders are not under selection, so they are simply carried forward.
@@ -266,7 +297,11 @@ fn from_spec(
 ) -> Persona {
     Persona {
         traits,
-        id: format!("{}-{}-g{generation}", role.short(), crate::config::slug(&spec.name)),
+        id: format!(
+            "{}-{}-g{generation}",
+            role.short(),
+            crate::config::slug(&spec.name)
+        ),
         name: spec.name,
         role,
         prompt: spec.prompt,
@@ -306,8 +341,11 @@ async fn call_meta(
     workspace: &std::path::Path,
 ) -> Result<(PersonaSpec, Usage)> {
     let resp = meta
-        .complete(Request::new(label, &prompt.system, &prompt.user).temperature(1.0)
-            .in_workspace(Some(workspace.to_path_buf())))
+        .complete(
+            Request::new(label, &prompt.system, &prompt.user)
+                .temperature(1.0)
+                .in_workspace(Some(workspace.to_path_buf())),
+        )
         .await?;
     let spec: PersonaSpec = extract_json(&resp.text)?;
     anyhow::ensure!(
@@ -320,8 +358,10 @@ async fn call_meta(
 /// The persona's own record, as the meta-prompt needs to see it: what it
 /// claimed and what the judge did with each claim.
 fn evidence_for(persona: &Persona, findings: &[Finding], rulings: &[Ruling]) -> String {
-    let by_id: HashMap<&str, &Ruling> =
-        rulings.iter().map(|r| (r.raw.finding_id.as_str(), r)).collect();
+    let by_id: HashMap<&str, &Ruling> = rulings
+        .iter()
+        .map(|r| (r.raw.finding_id.as_str(), r))
+        .collect();
 
     let mut s = String::new();
     let mut any = false;
@@ -336,7 +376,8 @@ fn evidence_for(persona: &Persona, findings: &[Finding], rulings: &[Ruling]) -> 
                     f.location(),
                     f.raw.title,
                     match r.raw.verdict {
-                        Verdict::Confirmed => format!("(ruled {} / {})", r.raw.severity, r.raw.altitude),
+                        Verdict::Confirmed =>
+                            format!("(ruled {} / {})", r.raw.severity, r.raw.altitude),
                         _ => String::new(),
                     },
                     r.raw.reasoning

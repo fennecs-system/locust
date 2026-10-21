@@ -35,7 +35,11 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(label: impl Into<String>, system: impl Into<String>, prompt: impl Into<String>) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        system: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
         Self {
             label: label.into(),
             system: system.into(),
@@ -172,7 +176,10 @@ pub(crate) enum RetryError {
 }
 
 pub(crate) fn classify(status: reqwest::StatusCode, body: &str) -> RetryError {
-    let e = anyhow::anyhow!("HTTP {status}: {}", body.chars().take(600).collect::<String>());
+    let e = anyhow::anyhow!(
+        "HTTP {status}: {}",
+        body.chars().take(600).collect::<String>()
+    );
     if status.as_u16() == 429 || status.is_server_error() {
         RetryError::Transient(e)
     } else {

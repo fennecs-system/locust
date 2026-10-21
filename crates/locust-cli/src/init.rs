@@ -11,15 +11,36 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 struct Detected {
-    api: Vec<(&'static str, &'static str, &'static str, &'static str, f64, f64)>,
+    api: Vec<(
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        f64,
+        f64,
+    )>,
     clis: Vec<&'static str>,
 }
 
 /// (name, wire, key env var, default model, $/Mtok in, $/Mtok out)
 const API_CANDIDATES: &[(&str, &str, &str, &str, f64, f64)] = &[
-    ("anthropic", "anthropic", "ANTHROPIC_API_KEY", "claude-opus-5", 5.0, 25.0),
+    (
+        "anthropic",
+        "anthropic",
+        "ANTHROPIC_API_KEY",
+        "claude-opus-5",
+        5.0,
+        25.0,
+    ),
     ("openai", "open_ai", "OPENAI_API_KEY", "gpt-5", 1.25, 10.0),
-    ("gemini", "gemini", "GEMINI_API_KEY", "gemini-2.5-pro", 1.25, 10.0),
+    (
+        "gemini",
+        "gemini",
+        "GEMINI_API_KEY",
+        "gemini-2.5-pro",
+        1.25,
+        10.0,
+    ),
 ];
 
 const CLI_CANDIDATES: &[&str] = &["claude", "codex", "gemini"];
@@ -42,7 +63,10 @@ fn detect() -> Detected {
 pub fn write_config(repo: &Path, force: bool) -> Result<()> {
     let path = repo.join(CONFIG_FILENAME);
     if path.exists() && !force {
-        bail!("{} already exists (pass --force to overwrite)", path.display());
+        bail!(
+            "{} already exists (pass --force to overwrite)",
+            path.display()
+        );
     }
 
     let found = detect();
@@ -63,7 +87,12 @@ pub fn write_config(repo: &Path, force: bool) -> Result<()> {
         println!(
             "  {} {}",
             term::dim("api"),
-            found.api.iter().map(|(n, ..)| *n).collect::<Vec<_>>().join(", ")
+            found
+                .api
+                .iter()
+                .map(|(n, ..)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     if !found.clis.is_empty() {
@@ -149,7 +178,11 @@ fn render(found: &Detected) -> String {
          # diversity.\n\
          judge_excludes_author = true\n\
          {}judge = \"{}\"\n",
-        if found.api.len() + found.clis.len() > 1 { "# " } else { "" },
+        if found.api.len() + found.clis.len() > 1 {
+            "# "
+        } else {
+            ""
+        },
         judge.as_deref().unwrap_or("anthropic")
     );
 
@@ -289,11 +322,23 @@ fn render(found: &Detected) -> String {
     );
 
     for (name, note) in [
-        ("stickler", "audits every claim, wants the evidence quoted, assumes the reviewer is wrong"),
-        ("pragmatist", "asks whether anyone will actually be hurt; deflates hypotheticals"),
-        ("architect", "will confirm a structural claim on the strength of the argument alone"),
+        (
+            "stickler",
+            "audits every claim, wants the evidence quoted, assumes the reviewer is wrong",
+        ),
+        (
+            "pragmatist",
+            "asks whether anyone will actually be hurt; deflates hypotheticals",
+        ),
+        (
+            "architect",
+            "will confirm a structural claim on the strength of the argument alone",
+        ),
     ] {
-        let _ = writeln!(s, "# {note}\n# [[judge]]\n# name = \"{name}\"\n# preset = \"{name}\"\n");
+        let _ = writeln!(
+            s,
+            "# {note}\n# [[judge]]\n# name = \"{name}\"\n# preset = \"{name}\"\n"
+        );
     }
 
     s.push_str(
@@ -313,9 +358,7 @@ fn render(found: &Detected) -> String {
     s.push_str("\n# --- providers ---------------------------------------------------------\n");
 
     if found.api.is_empty() && found.clis.is_empty() {
-        s.push_str(
-            "#\n# Nothing was detected on this machine. Uncomment one and set its key.\n",
-        );
+        s.push_str("#\n# Nothing was detected on this machine. Uncomment one and set its key.\n");
     }
 
     for (name, wire, env, model, cin, cout) in API_CANDIDATES {

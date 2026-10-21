@@ -1,5 +1,7 @@
 use super::{api_key, client};
-use crate::{classify, with_retries, Provider, ProviderSettings, Request, Response, RetryError, Usage};
+use crate::{
+    classify, with_retries, Provider, ProviderSettings, Request, Response, RetryError, Usage,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
@@ -11,7 +13,11 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
-    pub fn new(settings: ProviderSettings, base_url: Option<String>, key_env: &str) -> Result<Self> {
+    pub fn new(
+        settings: ProviderSettings,
+        base_url: Option<String>,
+        key_env: &str,
+    ) -> Result<Self> {
         Ok(Self {
             http: client(&settings)?,
             base_url: base_url
@@ -61,23 +67,37 @@ impl Provider for GeminiProvider {
                     .map_err(|e| RetryError::Transient(e.into()))?;
 
                 let status = resp.status();
-                let text = resp.text().await.map_err(|e| RetryError::Transient(e.into()))?;
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| RetryError::Transient(e.into()))?;
                 if !status.is_success() {
                     return Err(classify(status, &text));
                 }
-                serde_json::from_str(&text)
-                    .map_err(|e| RetryError::Permanent(anyhow::Error::from(e).context("decoding response")))
+                serde_json::from_str(&text).map_err(|e| {
+                    RetryError::Permanent(anyhow::Error::from(e).context("decoding response"))
+                })
             }
         })
         .await?;
 
         let text = value["candidates"][0]["content"]["parts"]
             .as_array()
-            .map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""))
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
             .context("response had no candidate parts")?;
 
-        let input = value["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);
-        let output = value["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0);
+        let input = value["usageMetadata"]["promptTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
+        let output = value["usageMetadata"]["candidatesTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
 
         Ok(Response {
             text,

@@ -49,14 +49,23 @@ pub fn cyan(s: &str) -> String {
 /// useful granularity.
 pub fn reporter(verbose: bool) -> Reporter {
     Arc::new(move |event: Event| match event {
-        Event::RunStarted { run_id, files, generations } => {
+        Event::RunStarted {
+            run_id,
+            files,
+            generations,
+        } => {
             eprintln!(
                 "{} {} · {files} files · {generations} generations",
                 bold("locust"),
                 dim(&run_id)
             );
         }
-        Event::GenerationStarted { generation, total, pressure, personas } => {
+        Event::GenerationStarted {
+            generation,
+            total,
+            pressure,
+            personas,
+        } => {
             eprintln!(
                 "\n{} {}",
                 bold(&format!("generation {}/{}", generation + 1, total)),
@@ -87,7 +96,13 @@ pub fn reporter(verbose: bool) -> Reporter {
             };
             eprintln!("  {:<8} {count} {}", cyan(phase), dim(noun));
         }
-        Event::GenerationFinished { confirmed, refuted, contested, top, .. } => {
+        Event::GenerationFinished {
+            confirmed,
+            refuted,
+            contested,
+            top,
+            ..
+        } => {
             let split = if contested > 0 {
                 format!(", {} the panel split on", bold(&contested.to_string()))
             } else {
@@ -112,7 +127,9 @@ pub fn reporter(verbose: bool) -> Reporter {
                 );
             }
         }
-        Event::Breeding { .. } => eprintln!("  {:<8} {}", cyan("breed"), dim("rewriting reviewers")),
+        Event::Breeding { .. } => {
+            eprintln!("  {:<8} {}", cyan("breed"), dim("rewriting reviewers"))
+        }
         Event::Warning { message } => {
             eprintln!("\n{} {}\n", yellow("warn"), message);
         }

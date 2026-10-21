@@ -34,7 +34,12 @@ impl JjVcs {
         let git = crate::git::GitVcs::open(&root)
             .context("locust's jj backend requires a git-colocated repository")?;
         let workspace_root = root.join(".locust").join("wt");
-        Ok(Self { root, workspace_root, git, add_lock: Mutex::new(()) })
+        Ok(Self {
+            root,
+            workspace_root,
+            git,
+            add_lock: Mutex::new(()),
+        })
     }
 
     fn jj(&self, args: &[&str]) -> Result<String> {
@@ -94,10 +99,22 @@ impl Vcs for JjVcs {
             let _ = self.jj(&["workspace", "forget", id]);
             let _ = std::fs::remove_dir_all(&path);
         }
-        self.jj(&["workspace", "add", "--name", id, "--revision", rev, &path.to_string_lossy()])
-            .with_context(|| format!("creating jj workspace `{id}` at {rev}"))?;
+        self.jj(&[
+            "workspace",
+            "add",
+            "--name",
+            id,
+            "--revision",
+            rev,
+            &path.to_string_lossy(),
+        ])
+        .with_context(|| format!("creating jj workspace `{id}` at {rev}"))?;
 
-        Ok(Workspace { id: id.to_string(), path, rev: rev.to_string() })
+        Ok(Workspace {
+            id: id.to_string(),
+            path,
+            rev: rev.to_string(),
+        })
     }
 
     fn destroy_workspace(&self, ws: &Workspace) -> Result<()> {

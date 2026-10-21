@@ -24,8 +24,10 @@ pub struct ContextPack {
 impl ContextPack {
     pub fn build(vcs: &dyn Vcs, range: &ReviewRange, cfg: &ContextConfig) -> Result<Self> {
         let all = vcs.changed_files(&range.merge_base, &range.target)?;
-        let files: Vec<ChangedFile> =
-            all.into_iter().filter(|f| !is_excluded(&f.path, &cfg.exclude)).collect();
+        let files: Vec<ChangedFile> = all
+            .into_iter()
+            .filter(|f| !is_excluded(&f.path, &cfg.exclude))
+            .collect();
 
         // Scoped to the surviving paths, so an excluded file is absent from
         // the diff as well as from the file list. Filtering only the list would
@@ -44,7 +46,9 @@ impl ContextPack {
 
             let mut used = 0usize;
             for f in ordered {
-                let Some(text) = vcs.show_file(&range.target, &f.path)? else { continue };
+                let Some(text) = vcs.show_file(&range.target, &f.path)? else {
+                    continue;
+                };
                 if looks_binary(&text) {
                     continue;
                 }
@@ -83,11 +87,20 @@ impl ContextPack {
         let mut s = String::new();
 
         let _ = writeln!(s, "## Change under review");
-        let _ = writeln!(s, "\nbase `{}` → target `{}`\n", short(&self.range.base), short(&self.range.target));
+        let _ = writeln!(
+            s,
+            "\nbase `{}` → target `{}`\n",
+            short(&self.range.base),
+            short(&self.range.target)
+        );
 
         let _ = writeln!(s, "### Files touched\n");
         for f in &self.files {
-            let _ = writeln!(s, "- `{}` ({:?}, +{} -{})", f.path, f.status, f.added, f.removed);
+            let _ = writeln!(
+                s,
+                "- `{}` ({:?}, +{} -{})",
+                f.path, f.status, f.added, f.removed
+            );
         }
 
         if !self.notes.trim().is_empty() {

@@ -312,7 +312,11 @@ mod tests {
         for role in [Role::Attacker, Role::Defender] {
             let lib = library(role);
             let ids: std::collections::HashSet<_> = lib.iter().map(|p| &p.id).collect();
-            assert_eq!(ids.len(), lib.len(), "duplicate persona id in {role:?} library");
+            assert_eq!(
+                ids.len(),
+                lib.len(),
+                "duplicate persona id in {role:?} library"
+            );
             assert!(lib.len() >= 3);
         }
     }
@@ -320,7 +324,10 @@ mod tests {
     #[test]
     fn immigrants_avoid_the_current_population() {
         let mut rng = rand::thread_rng();
-        let present: Vec<String> = library(Role::Defender).iter().map(|p| p.name.clone()).collect();
+        let present: Vec<String> = library(Role::Defender)
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         assert!(immigrant(Role::Defender, &present, &mut rng).is_none());
         assert!(immigrant(Role::Defender, &[], &mut rng).is_some());
     }

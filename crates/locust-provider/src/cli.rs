@@ -9,9 +9,9 @@ use crate::{extract_json, Provider, ProviderSettings, Request, Response, Usage};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// How to recover the assistant's text from the CLI's stdout.
@@ -32,7 +32,11 @@ pub enum Extract {
     /// emits one `item.completed` per tool call, per reasoning step and per
     /// message, so taking every item's text would splice the agent's working
     /// notes into its answer.
-    JsonLinesWhere { path: String, key: String, equals: String },
+    JsonLinesWhere {
+        path: String,
+        key: String,
+        equals: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -106,8 +110,12 @@ impl Provider for CliProvider {
         // command is appended to it: `docker run ... -- claude -p ...`.
         // locust never builds a sandbox itself; it only arranges to be run
         // inside one somebody else configured.
-        let mut argv: Vec<String> =
-            self.spec.wrapper.iter().map(|a| self.render_wrapper(a, &req)).collect();
+        let mut argv: Vec<String> = self
+            .spec
+            .wrapper
+            .iter()
+            .map(|a| self.render_wrapper(a, &req))
+            .collect();
         argv.extend(self.spec.command.iter().map(|a| self.render(a, &req)));
         let (program, args) = argv.split_first().expect("non-empty, checked in new()");
 
@@ -137,9 +145,9 @@ impl Provider for CliProvider {
             cmd.current_dir(ws);
         }
 
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("spawning `{program}` for provider `{}`", self.settings.name))?;
+        let mut child = cmd.spawn().with_context(|| {
+            format!("spawning `{program}` for provider `{}`", self.settings.name)
+        })?;
 
         // Readers first, before anything is written. A child that starts
         // talking immediately fills its pipe buffer and blocks, and if locust
@@ -255,8 +263,9 @@ impl Provider for CliProvider {
         let text = match &self.spec.extract {
             Extract::Raw => stdout.clone(),
             Extract::JsonPath(path) => {
-                let v: serde_json::Value = extract_json(&stdout)
-                    .with_context(|| format!("provider `{}` did not emit JSON", self.settings.name))?;
+                let v: serde_json::Value = extract_json(&stdout).with_context(|| {
+                    format!("provider `{}` did not emit JSON", self.settings.name)
+                })?;
                 dig(&v, path)
                     .and_then(|v| v.as_str().map(str::to_string))
                     .with_context(|| format!("no string at `{path}` in CLI output"))?
@@ -285,8 +294,10 @@ impl Provider for CliProvider {
                 "provider `{}` exited successfully but produced no reply on `{}`: {}",
                 self.settings.name,
                 req.label,
-                stream_errors(&stdout)
-                    .unwrap_or_else(|| failure_detail(&stdout, &String::from_utf8_lossy(&out.stderr)))
+                stream_errors(&stdout).unwrap_or_else(|| failure_detail(
+                    &stdout,
+                    &String::from_utf8_lossy(&out.stderr)
+                ))
             );
         }
 
@@ -306,8 +317,10 @@ impl Provider for CliProvider {
                 });
 
             if let Some(u) = found {
-                usage.input_tokens =
-                    u["input_tokens"].as_u64().or_else(|| u["prompt_tokens"].as_u64()).unwrap_or(0);
+                usage.input_tokens = u["input_tokens"]
+                    .as_u64()
+                    .or_else(|| u["prompt_tokens"].as_u64())
+                    .unwrap_or(0);
                 usage.output_tokens = u["output_tokens"]
                     .as_u64()
                     .or_else(|| u["completion_tokens"].as_u64())
@@ -315,13 +328,18 @@ impl Provider for CliProvider {
             }
             // Many CLIs report cost directly; prefer that over our estimate.
             if let Ok(v) = extract_json::<serde_json::Value>(&stdout) {
-                if let Some(cost) = v["total_cost_usd"].as_f64().or_else(|| v["cost_usd"].as_f64()) {
+                if let Some(cost) = v["total_cost_usd"]
+                    .as_f64()
+                    .or_else(|| v["cost_usd"].as_f64())
+                {
                     usage.cost_usd = cost;
                 }
             }
         }
         if usage.cost_usd == 0.0 {
-            usage.cost_usd = self.settings.estimate_cost(usage.input_tokens, usage.output_tokens);
+            usage.cost_usd = self
+                .settings
+                .estimate_cost(usage.input_tokens, usage.output_tokens);
         }
 
         Ok(Response {
@@ -346,12 +364,18 @@ static ACTIVE_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 #[cfg(unix)]
 fn register_group(pid: i32) {
-    ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+    ACTIVE_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(pid);
 }
 
 #[cfg(unix)]
 fn forget_group(pid: i32) {
-    ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid);
+    ACTIVE_GROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| *p != pid);
 }
 
 /// Signal every agent still running. Call this when the process is going away
@@ -380,7 +404,10 @@ where
     loop {
         match pipe.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
-            Ok(n) => into.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+            Ok(n) => into
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(&chunk[..n]),
         }
     }
 }
@@ -393,15 +420,22 @@ fn stream_errors(stdout: &str) -> Option<String> {
     let mut messages: Vec<String> = Vec::new();
     for value in jsonl(stdout) {
         for key in ["item", "msg", "error"] {
-            let Some(node) = dig(&value, key) else { continue };
+            let Some(node) = dig(&value, key) else {
+                continue;
+            };
             let is_error = node.get("type").and_then(|t| t.as_str()) == Some("error")
-                || value.get("type").and_then(|t| t.as_str()).is_some_and(|t| t.contains("error"))
+                || value
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t.contains("error"))
                 || value.get("type").and_then(|t| t.as_str()) == Some("turn.failed");
             if !is_error {
                 continue;
             }
-            if let Some(text) =
-                node.get("message").or_else(|| node.get("text")).and_then(|m| m.as_str())
+            if let Some(text) = node
+                .get("message")
+                .or_else(|| node.get("text"))
+                .and_then(|m| m.as_str())
             {
                 messages.push(text.to_string());
             }
@@ -472,15 +506,19 @@ fn failure_detail(stdout: &str, stderr: &str) -> String {
 /// interleave plain-text notices with their event stream often enough that a
 /// strict parse would throw the whole transcript away.
 fn jsonl(stdout: &str) -> impl Iterator<Item = serde_json::Value> + '_ {
-    stdout.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
 }
 
 /// Follow a slash-separated path into a JSON value.
 fn dig<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    path.split('/').filter(|s| !s.is_empty()).try_fold(v, |acc, key| match key.parse::<usize>() {
-        Ok(i) => acc.get(i),
-        Err(_) => acc.get(key),
-    })
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .try_fold(v, |acc, key| match key.parse::<usize>() {
+            Ok(i) => acc.get(i),
+            Err(_) => acc.get(key),
+        })
 }
 
 /// Ready-made specs for the agentic CLIs people actually have installed, so
@@ -503,9 +541,9 @@ pub fn preset(name: &str) -> Option<(CliSpec, &'static str)> {
                     "--append-system-prompt",
                     "{system}",
                 ]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
                 stdin: Some("{prompt}".into()),
                 extract: Extract::JsonPath("result".into()),
                 usage_path: Some("usage".into()),
@@ -604,7 +642,11 @@ mod tests {
     }
 
     fn settings(timeout_secs: u64) -> ProviderSettings {
-        ProviderSettings { name: "test".into(), timeout_secs, ..ProviderSettings::default() }
+        ProviderSettings {
+            name: "test".into(),
+            timeout_secs,
+            ..ProviderSettings::default()
+        }
     }
 
     #[cfg(unix)]
@@ -616,13 +658,16 @@ mod tests {
             fn drop(&mut self) {
                 if let Ok(pid) = std::fs::read_to_string(&self.0) {
                     if let Ok(pid) = pid.trim().parse::<i32>() {
-                        unsafe { libc::kill(-pid, libc::SIGKILL); }
+                        unsafe {
+                            libc::kill(-pid, libc::SIGKILL);
+                        }
                     }
                 }
                 let _ = std::fs::remove_file(&self.0);
             }
         }
-        let cleanup = Cleanup(std::env::temp_dir().join(format!("locust-stdin-{}", std::process::id())));
+        let cleanup =
+            Cleanup(std::env::temp_dir().join(format!("locust-stdin-{}", std::process::id())));
         let script = format!(
             "echo $$ > '{}'; exec 3<&0; sleep 30 <&3 >/dev/null 2>&1 & echo ok",
             cleanup.0.display()
@@ -630,9 +675,13 @@ mod tests {
         let mut spec = spec(&["sh", "-c", &script]);
         spec.stdin = Some("{prompt}".into());
         let provider = CliProvider::new(settings(1), spec).unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3),
-            provider.complete(Request::new("t", "s", "x".repeat(2 * 1024 * 1024))))
-            .await.expect("stdin writer must be cancelled after the parent exits").unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            provider.complete(Request::new("t", "s", "x".repeat(2 * 1024 * 1024))),
+        )
+        .await
+        .expect("stdin writer must be cancelled after the parent exits")
+        .unwrap();
         assert_eq!(result.text.trim(), "ok");
     }
 
@@ -649,12 +698,8 @@ mod tests {
 
         // Parent sleeps; grandchild outlives it unless the group is signalled,
         // and writes the marker to prove it was still alive.
-        let script = format!(
-            "( sleep 5; touch {} ) & sleep 30",
-            marker.display()
-        );
-        let provider =
-            CliProvider::new(settings(1), spec(&["sh", "-c", &script])).unwrap();
+        let script = format!("( sleep 5; touch {} ) & sleep 30", marker.display());
+        let provider = CliProvider::new(settings(1), spec(&["sh", "-c", &script])).unwrap();
 
         let started = std::time::Instant::now();
         let err = provider
@@ -662,7 +707,10 @@ mod tests {
             .await
             .expect_err("must time out");
         assert!(err.to_string().contains("exceeded timeout"), "got: {err}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(4), "returned promptly");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "returned promptly"
+        );
 
         // Past when the grandchild would have fired had it survived.
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
@@ -683,8 +731,7 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
 
         let script = format!("( sleep 4; touch {} ) & sleep 30", marker.display());
-        let provider =
-            CliProvider::new(settings(60), spec(&["sh", "-c", &script])).unwrap();
+        let provider = CliProvider::new(settings(60), spec(&["sh", "-c", &script])).unwrap();
 
         let agent = tokio::spawn(async move {
             let _ = provider.complete(Request::new("t", "s", "p")).await;
@@ -705,8 +752,7 @@ mod tests {
     async fn a_child_writing_more_than_a_pipe_buffer_still_completes() {
         // 1 MiB, far beyond the usual 64 KiB pipe capacity.
         let script = "yes 0123456789abcdef | head -c 1048576";
-        let provider =
-            CliProvider::new(settings(30), spec(&["sh", "-c", script])).unwrap();
+        let provider = CliProvider::new(settings(30), spec(&["sh", "-c", script])).unwrap();
 
         let resp = provider
             .complete(Request::new("t", "sys", "prompt"))
@@ -728,8 +774,15 @@ mod tests {
             .collect();
 
         let provider = CliProvider::new(settings(30), spec).unwrap();
-        let resp = provider.complete(Request::new("t", "s", "p")).await.unwrap();
-        assert_eq!(resp.text.trim(), "inside", "the agent did not run under the wrapper");
+        let resp = provider
+            .complete(Request::new("t", "s", "p"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.text.trim(),
+            "inside",
+            "the agent did not run under the wrapper"
+        );
     }
 
     #[tokio::test]
@@ -755,8 +808,10 @@ mod tests {
     #[tokio::test]
     async fn prompt_text_is_not_interpolated_into_the_wrapper() {
         let mut spec = spec(&["sh", "-c", "echo done"]);
-        spec.wrapper =
-            ["env", "WRAP={prompt}{system}"].iter().map(|s| s.to_string()).collect();
+        spec.wrapper = ["env", "WRAP={prompt}{system}"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let provider = CliProvider::new(settings(30), spec).unwrap();
         let resp = provider
@@ -773,7 +828,10 @@ mod tests {
     #[tokio::test]
     async fn no_wrapper_means_the_command_runs_directly() {
         let provider = CliProvider::new(settings(30), spec(&["echo", "plain"])).unwrap();
-        let resp = provider.complete(Request::new("t", "s", "p")).await.unwrap();
+        let resp = provider
+            .complete(Request::new("t", "s", "p"))
+            .await
+            .unwrap();
         assert_eq!(resp.text.trim(), "plain");
     }
 
@@ -784,7 +842,10 @@ mod tests {
             spec(&["sh", "-c", "echo 'quota exhausted' ; exit 1"]),
         )
         .unwrap();
-        let err = provider.complete(Request::new("t", "s", "p")).await.unwrap_err();
+        let err = provider
+            .complete(Request::new("t", "s", "p"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("quota exhausted"), "got: {err}");
     }
 
@@ -843,7 +904,10 @@ mod tests {
             .join("\n");
 
         assert_eq!(text, r#"{"findings":[]}"#);
-        assert!(!text.contains("working notes"), "reasoning leaked into the reply");
+        assert!(
+            !text.contains("working notes"),
+            "reasoning leaked into the reply"
+        );
         assert!(!text.contains("grep"), "a tool call leaked into the reply");
     }
 
@@ -864,15 +928,28 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[1]}"}}"#,
         );
         let mut spec = codex_spec();
-        spec.command = vec!["sh".into(), "-c".into(), format!("cat <<'EOF'\n{stream}\nEOF")];
+        spec.command = vec![
+            "sh".into(),
+            "-c".into(),
+            format!("cat <<'EOF'\n{stream}\nEOF"),
+        ];
         spec.stdin = None;
 
         let provider = CliProvider::new(settings(30), spec).unwrap();
-        let resp = provider.complete(Request::new("t", "s", "p")).await.unwrap();
+        let resp = provider
+            .complete(Request::new("t", "s", "p"))
+            .await
+            .unwrap();
 
         assert_eq!(resp.text, r#"{"findings":[1]}"#);
-        assert!(!resp.text.contains("scanning"), "a progress note was read as the report");
-        assert!(!resp.text.contains("deciding"), "reasoning leaked into the reply");
+        assert!(
+            !resp.text.contains("scanning"),
+            "a progress note was read as the report"
+        );
+        assert!(
+            !resp.text.contains("deciding"),
+            "reasoning leaked into the reply"
+        );
     }
 
     /// Raised by claude reviewing the same adapter: a turn that fails after
@@ -885,14 +962,23 @@ mod tests {
         spec.command = vec!["sh".into(), "-c".into(), format!("echo '{stream}'")];
 
         let provider = CliProvider::new(settings(30), spec).unwrap();
-        let err = provider.complete(Request::new("t", "s", "p")).await.unwrap_err().to_string();
+        let err = provider
+            .complete(Request::new("t", "s", "p"))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("produced no reply"), "got: {err}");
-        assert!(err.contains("stream disconnected"), "the stream's own error must surface: {err}");
+        assert!(
+            err.contains("stream disconnected"),
+            "the stream's own error must surface: {err}"
+        );
     }
 
     #[test]
     fn usage_is_read_from_the_line_that_carries_it() {
-        let usage: Vec<_> = jsonl(CODEX_STREAM).filter_map(|v| dig(&v, "usage").cloned()).collect();
+        let usage: Vec<_> = jsonl(CODEX_STREAM)
+            .filter_map(|v| dig(&v, "usage").cloned())
+            .collect();
         let last = usage.last().expect("a usage record");
         assert_eq!(last["input_tokens"].as_u64(), Some(14176));
         assert_eq!(last["output_tokens"].as_u64(), Some(5));
@@ -910,8 +996,14 @@ mod tests {
         let argv = spec.command.join(" ");
         // `gpt-5` was not a model this codex knows; passing one it does keeps
         // runs reproducible and fails loudly rather than silently drifting.
-        assert!(argv.contains("-m {model}"), "model must be explicit: {argv}");
-        assert!(argv.contains("--sandbox read-only"), "a reviewer only reads: {argv}");
+        assert!(
+            argv.contains("-m {model}"),
+            "model must be explicit: {argv}"
+        );
+        assert!(
+            argv.contains("--sandbox read-only"),
+            "a reviewer only reads: {argv}"
+        );
         // No system-prompt flag exists, so both halves go in on stdin.
         assert_eq!(spec.stdin.as_deref(), Some("{system}\n\n{prompt}"));
     }

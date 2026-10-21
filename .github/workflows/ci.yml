@@ -6,9 +6,9 @@
 # `main` should be a protected branch, leaving this workflow to do little more
 # than build and upload artifacts for commits that are already green.
 #
-# `cargo fmt --all -- --check` is deliberately NOT a gate yet: the tree is not
-# rustfmt-clean (27 tracked files differ under stable rustfmt 1.99). Add the
-# gate in the same commit that reformats the codebase, not before.
+# `cases/` is excluded from the workspace, so none of these touch the benchmark
+# fixtures -- they are deliberately broken code and must stay exactly as
+# written. Their own ground truth runs separately.
 
 name: CI
 
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   gate:
-    name: Gates (clippy + tests)
+    name: Gates (fmt + clippy + tests)
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -39,10 +39,13 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

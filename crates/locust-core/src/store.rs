@@ -24,7 +24,10 @@ impl Store {
         if !ignore.exists() {
             let _ = std::fs::write(&ignore, "*\n");
         }
-        Ok(Self { run_dir, run_id: run_id.to_string() })
+        Ok(Self {
+            run_dir,
+            run_id: run_id.to_string(),
+        })
     }
 
     pub fn write_json<T: Serialize>(&self, rel: &str, value: &T) -> Result<()> {
@@ -73,8 +76,12 @@ pub fn new_run_id() -> String {
 /// Most recent run under `.locust/runs`, for `locust report` with no argument.
 pub fn latest_run(repo_root: &Path) -> Option<PathBuf> {
     let runs = repo_root.join(".locust").join("runs");
-    let mut entries: Vec<PathBuf> =
-        std::fs::read_dir(runs).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(runs)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     entries.sort();
     entries.pop()
 }

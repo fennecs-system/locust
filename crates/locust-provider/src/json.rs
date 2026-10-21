@@ -138,7 +138,8 @@ mod tests {
 
     #[test]
     fn braces_inside_strings_do_not_confuse_the_scanner() {
-        let text = r#"Prose. {"file":"a.rs","claim":"the macro expands to vec!{1} \" here"} trailing"#;
+        let text =
+            r#"Prose. {"file":"a.rs","claim":"the macro expands to vec!{1} \" here"} trailing"#;
         let v: Finding = extract_json(text).unwrap();
         assert_eq!(v.claim, r#"the macro expands to vec!{1} " here"#);
     }

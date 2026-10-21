@@ -402,21 +402,45 @@ impl Ruling {
 
         // Severity and altitude are taken from the judges who actually carried
         // the verdict; a refuting judge's severity rating is meaningless.
-        let backers: Vec<&JudgeVote> =
-            votes.iter().filter(|v| v.raw.verdict == winner).collect();
-        let backers = if backers.is_empty() { votes.iter().collect() } else { backers };
+        let backers: Vec<&JudgeVote> = votes.iter().filter(|v| v.raw.verdict == winner).collect();
+        let backers = if backers.is_empty() {
+            votes.iter().collect()
+        } else {
+            backers
+        };
 
-        let severity = weighted_pick(&backers, |v| severity_index(v.raw.severity), |i| {
-            [Severity::Low, Severity::Medium, Severity::High, Severity::Critical][i]
-        });
-        let altitude = weighted_pick(&backers, |v| altitude_index(v.raw.altitude), |i| {
-            [Altitude::Line, Altitude::Local, Altitude::Module, Altitude::Architectural][i]
-        });
+        let severity = weighted_pick(
+            &backers,
+            |v| severity_index(v.raw.severity),
+            |i| {
+                [
+                    Severity::Low,
+                    Severity::Medium,
+                    Severity::High,
+                    Severity::Critical,
+                ][i]
+            },
+        );
+        let altitude = weighted_pick(
+            &backers,
+            |v| altitude_index(v.raw.altitude),
+            |i| {
+                [
+                    Altitude::Line,
+                    Altitude::Local,
+                    Altitude::Module,
+                    Altitude::Architectural,
+                ][i]
+            },
+        );
 
         // Staleness and duplication are factual observations rather than
         // judgements, so any judge spotting one needs a majority to carry it.
-        let novel_against: f64 =
-            votes.iter().filter(|v| !v.raw.novel).map(|v| v.weight.max(0.0)).sum();
+        let novel_against: f64 = votes
+            .iter()
+            .filter(|v| !v.raw.novel)
+            .map(|v| v.weight.max(0.0))
+            .sum();
         let novel = novel_against * 2.0 <= total;
 
         let duplicate_of = majority_duplicate(&votes, total);
@@ -493,8 +517,11 @@ impl Ruling {
 
     /// `2/3` style tally of judges backing the winning verdict.
     pub fn tally(&self) -> (usize, usize) {
-        let backing =
-            self.panel.iter().filter(|v| v.raw.verdict == self.raw.verdict).count();
+        let backing = self
+            .panel
+            .iter()
+            .filter(|v| v.raw.verdict == self.raw.verdict)
+            .count();
         (backing, self.panel.len())
     }
 }
@@ -702,7 +729,9 @@ pub struct GenerationOutcome {
 
 impl GenerationOutcome {
     pub fn confirmed(&self) -> impl Iterator<Item = &Ruling> {
-        self.rulings.iter().filter(|r| r.raw.verdict == Verdict::Confirmed)
+        self.rulings
+            .iter()
+            .filter(|r| r.raw.verdict == Verdict::Confirmed)
     }
 }
 
@@ -742,9 +771,8 @@ impl RunOutcome {
             }
         }
         out.sort_by(|a, b| {
-            let key = |(f, r): &(&Finding, &Ruling)| {
-                (r.raw.severity, r.raw.altitude, f.corroboration)
-            };
+            let key =
+                |(f, r): &(&Finding, &Ruling)| (r.raw.severity, r.raw.altitude, f.corroboration);
             key(b).cmp(&key(a))
         });
         out
@@ -799,7 +827,10 @@ mod tests {
         assert_eq!(r.tally(), (2, 3));
         // The dissenting opinion survives into the report rather than being
         // collapsed away by the verdict.
-        assert!(r.panel.iter().any(|v| v.judge == "stickler" && v.raw.verdict == Verdict::Confirmed));
+        assert!(r
+            .panel
+            .iter()
+            .any(|v| v.judge == "stickler" && v.raw.verdict == Verdict::Confirmed));
     }
 
     /// Taken from a live run: `pragmatist` and `architect` both confirmed every
@@ -845,7 +876,10 @@ mod tests {
         ];
         let r = Ruling::from_panel("f1", 0, votes).unwrap();
         assert_eq!(r.severity_spread(), 0);
-        assert!(r.contested(), "but the refusal itself is still a disagreement");
+        assert!(
+            r.contested(),
+            "but the refusal itself is still a disagreement"
+        );
     }
 
     #[test]
@@ -863,7 +897,11 @@ mod tests {
             vote("b", Verdict::Refuted, Severity::High, 1.0),
         ];
         let r = Ruling::from_panel("f1", 0, votes).unwrap();
-        assert_eq!(r.raw.verdict, Verdict::Undecided, "a tie must not silently pick a side");
+        assert_eq!(
+            r.raw.verdict,
+            Verdict::Undecided,
+            "a tie must not silently pick a side"
+        );
     }
 
     #[test]
@@ -918,10 +956,16 @@ mod tests {
     fn merging_two_findings_needs_a_majority_not_one_opinion() {
         let mut lone = vote("a", Verdict::Confirmed, Severity::High, 1.0);
         lone.raw.duplicate_of = Some("f9".into());
-        let votes =
-            vec![lone, vote("b", Verdict::Confirmed, Severity::High, 1.0), vote("c", Verdict::Confirmed, Severity::High, 1.0)];
+        let votes = vec![
+            lone,
+            vote("b", Verdict::Confirmed, Severity::High, 1.0),
+            vote("c", Verdict::Confirmed, Severity::High, 1.0),
+        ];
         let r = Ruling::from_panel("f1", 0, votes).unwrap();
-        assert_eq!(r.raw.duplicate_of, None, "one judge must not be able to hide a finding");
+        assert_eq!(
+            r.raw.duplicate_of, None,
+            "one judge must not be able to hide a finding"
+        );
 
         let mut x = vote("a", Verdict::Confirmed, Severity::High, 1.0);
         let mut y = vote("b", Verdict::Confirmed, Severity::High, 1.0);
@@ -936,8 +980,11 @@ mod tests {
     fn staleness_also_needs_a_majority() {
         let mut lone = vote("a", Verdict::Confirmed, Severity::High, 1.0);
         lone.raw.novel = false;
-        let votes =
-            vec![lone, vote("b", Verdict::Confirmed, Severity::High, 1.0), vote("c", Verdict::Confirmed, Severity::High, 1.0)];
+        let votes = vec![
+            lone,
+            vote("b", Verdict::Confirmed, Severity::High, 1.0),
+            vote("c", Verdict::Confirmed, Severity::High, 1.0),
+        ];
         assert!(Ruling::from_panel("f1", 0, votes).unwrap().raw.novel);
     }
 

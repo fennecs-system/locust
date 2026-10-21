@@ -18,9 +18,16 @@ use std::sync::{Arc, Mutex};
 // --- a repository to review ------------------------------------------------
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git").args(args).current_dir(dir).output()?;
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()?;
     if !out.status.success() {
-        bail!("git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -142,7 +149,9 @@ impl Provider for Scripted {
                 })
                 .collect();
             format!(r#"{{"rulings":[{}]}}"#, rulings.join(","))
-        } else if req.system.contains("You are tuning the reviewer population")
+        } else if req
+            .system
+            .contains("You are tuning the reviewer population")
             || req.system.contains("You are breeding reviewers")
         {
             r#"{"name":"bred reviewer","focus":"structure","prompt":"You look only at whether the change is shaped correctly, reading well beyond the diff to find responsibilities that have landed in the wrong layer."}"#.to_string()
@@ -171,12 +180,19 @@ impl Provider for Scripted {
                 .collect();
             // Wrapped in prose on purpose: real models do this constantly, and
             // the extractor has to cope.
-            format!("Here is my review.\n\n```json\n{{\"findings\":[{}]}}\n```\n", fs.join(","))
+            format!(
+                "Here is my review.\n\n```json\n{{\"findings\":[{}]}}\n```\n",
+                fs.join(",")
+            )
         };
 
         Ok(Response {
             text,
-            usage: Usage { input_tokens: 10, output_tokens: 20, cost_usd: 0.01 },
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cost_usd: 0.01,
+            },
             provider: self.name.clone(),
             model: "scripted".into(),
         })
@@ -187,11 +203,21 @@ impl Provider for Scripted {
 fn ids_in(text: &str, marker: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let Some(rest) = line.trim().strip_prefix(marker) else { continue };
-        let token = rest.trim_start_matches('*').split_whitespace().next().unwrap_or("");
+        let Some(rest) = line.trim().strip_prefix(marker) else {
+            continue;
+        };
+        let token = rest
+            .trim_start_matches('*')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
         let id = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
         if id.starts_with('f') && id.contains('-') && !out.iter().any(|(e, _)| e == id) {
-            let altitude = if text.contains("architectural") { "architectural" } else { "local" };
+            let altitude = if text.contains("architectural") {
+                "architectural"
+            } else {
+                "local"
+            };
             out.push((id.to_string(), altitude.to_string()));
         }
     }
@@ -242,7 +268,12 @@ async fn a_confirmed_finding_survives_to_the_report() -> Result<()> {
 
     let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute() result is doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute() result is doubled without bounds checking",
+            "local",
+        )],
     ));
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
@@ -250,12 +281,22 @@ async fn a_confirmed_finding_survives_to_the_report() -> Result<()> {
 
     assert_eq!(outcome.generations.len(), 1);
     let gen = &outcome.generations[0];
-    assert_eq!(gen.findings.len(), 2, "two reviewers each raised one finding");
+    assert_eq!(
+        gen.findings.len(),
+        2,
+        "two reviewers each raised one finding"
+    );
     assert!(!gen.rulings.is_empty(), "the judge ruled");
-    assert!(gen.rulings.iter().all(|r| r.raw.verdict == Verdict::Confirmed));
+    assert!(gen
+        .rulings
+        .iter()
+        .all(|r| r.raw.verdict == Verdict::Confirmed));
 
     let confirmed = outcome.confirmed_findings();
-    assert!(!confirmed.is_empty(), "a confirmed finding reaches the report");
+    assert!(
+        !confirmed.is_empty(),
+        "a confirmed finding reaches the report"
+    );
     assert!(!outcome.themes.is_empty(), "synthesis produced a theme");
 
     let md = locust_core::report::markdown(&outcome, &cfg);
@@ -263,8 +304,9 @@ async fn a_confirmed_finding_survives_to_the_report() -> Result<()> {
     assert!(md.contains("src/pool.rs"));
 
     // Artifacts are on disk and parseable.
-    let findings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(arena.run_dir().join("gen-0/findings.json"))?)?;
+    let findings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        arena.run_dir().join("gen-0/findings.json"),
+    )?)?;
     assert!(findings.as_array().is_some_and(|a| !a.is_empty()));
 
     std::fs::remove_dir_all(&repo).ok();
@@ -280,11 +322,21 @@ async fn the_same_finding_from_two_providers_is_judged_once_and_counted_twice() 
     // Both vendors describe the same defect in slightly different words.
     let a: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     ));
     let b: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "beta",
-        vec![("src/pool.rs", 3, "bounds checking missing before compute result is doubled", "local")],
+        vec![(
+            "src/pool.rs",
+            3,
+            "bounds checking missing before compute result is doubled",
+            "local",
+        )],
     ));
 
     let arena = Arena::with_providers(cfg, vcs, vec![a, b], silent())?;
@@ -311,10 +363,17 @@ async fn a_provider_that_fails_shrinks_the_population_without_killing_the_run() 
 
     let a: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     ));
-    let b: locust_provider::SharedProvider =
-        Arc::new(Scripted::new("beta", vec![("src/pool.rs", 9, "unrelated claim", "local")]).failing_after(0));
+    let b: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("beta", vec![("src/pool.rs", 9, "unrelated claim", "local")])
+            .failing_after(0),
+    );
 
     let failures = Arc::new(AtomicUsize::new(0));
     let seen = failures.clone();
@@ -327,7 +386,10 @@ async fn a_provider_that_fails_shrinks_the_population_without_killing_the_run() 
     let arena = Arena::with_providers(cfg, vcs, vec![a, b], reporter)?;
     let outcome = arena.run().await?;
 
-    assert!(failures.load(Ordering::SeqCst) > 0, "the failure was reported, not swallowed");
+    assert!(
+        failures.load(Ordering::SeqCst) > 0,
+        "the failure was reported, not swallowed"
+    );
     assert!(
         !outcome.generations[0].findings.is_empty(),
         "the healthy provider's findings still made it through"
@@ -344,14 +406,21 @@ async fn refuted_findings_leave_the_reviewer_with_a_negative_score() -> Result<(
     let cfg = config(1, 2, &["alpha"]);
 
     let provider: locust_provider::SharedProvider = Arc::new(
-        Scripted::new("alpha", vec![("src/pool.rs", 2, "speculative claim", "line")]).refuting(),
+        Scripted::new(
+            "alpha",
+            vec![("src/pool.rs", 2, "speculative claim", "line")],
+        )
+        .refuting(),
     );
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
     let outcome = arena.run().await?;
     let gen = &outcome.generations[0];
 
-    assert!(gen.rulings.iter().all(|r| r.raw.verdict == Verdict::Refuted));
+    assert!(gen
+        .rulings
+        .iter()
+        .all(|r| r.raw.verdict == Verdict::Refuted));
     let scored: Vec<_> = gen.fitness.iter().filter(|f| f.raised > 0).collect();
     assert!(!scored.is_empty());
     assert!(
@@ -375,7 +444,12 @@ async fn generations_breed_a_new_population_and_ban_settled_ground() -> Result<(
 
     let provider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "architectural")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "architectural",
+        )],
     ));
     let shared: locust_provider::SharedProvider = provider.clone();
 
@@ -385,11 +459,20 @@ async fn generations_breed_a_new_population_and_ban_settled_ground() -> Result<(
     assert_eq!(outcome.generations.len(), 2);
 
     // The second generation's population is not the first's.
-    let g0: Vec<&str> =
-        outcome.generations[0].personas.iter().map(|p| p.name.as_str()).collect();
-    let g1: Vec<&str> =
-        outcome.generations[1].personas.iter().map(|p| p.name.as_str()).collect();
-    assert!(g1.contains(&"bred reviewer"), "a mutant entered the population: {g1:?}");
+    let g0: Vec<&str> = outcome.generations[0]
+        .personas
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let g1: Vec<&str> = outcome.generations[1]
+        .personas
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        g1.contains(&"bred reviewer"),
+        "a mutant entered the population: {g1:?}"
+    );
     assert_ne!(g0, g1);
 
     // Pressure rose, and the later attack prompts carried the ban list.
@@ -397,8 +480,14 @@ async fn generations_breed_a_new_population_and_ban_settled_ground() -> Result<(
     assert_eq!(outcome.generations[1].pressure, 1.0);
 
     let labels = provider.seen.lock().unwrap().clone();
-    assert!(labels.iter().any(|l| l.starts_with("gen1-atk")), "generation 1 ran: {labels:?}");
-    assert!(labels.iter().any(|l| l.contains("mutate")), "breeding called the meta-provider");
+    assert!(
+        labels.iter().any(|l| l.starts_with("gen1-atk")),
+        "generation 1 ran: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("mutate")),
+        "breeding called the meta-provider"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())
@@ -429,7 +518,9 @@ async fn breeding_never_fills_a_generation_with_the_same_reviewer_twice() -> Res
             "scripted"
         }
         async fn complete(&self, req: Request) -> Result<Response> {
-            if req.system.contains("You are tuning the reviewer population")
+            if req
+                .system
+                .contains("You are tuning the reviewer population")
                 || req.system.contains("You are breeding reviewers")
             {
                 bail!("meta-provider is down");
@@ -440,12 +531,21 @@ async fn breeding_never_fills_a_generation_with_the_same_reviewer_twice() -> Res
 
     let provider: locust_provider::SharedProvider = Arc::new(BrokenMeta(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     )));
 
     let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
     let outcome = arena.run().await?;
-    assert_eq!(outcome.generations.len(), 2, "a failed mutation must not abort the run");
+    assert_eq!(
+        outcome.generations.len(),
+        2,
+        "a failed mutation must not abort the run"
+    );
 
     for gen in &outcome.generations {
         let names: Vec<&str> = gen
@@ -455,7 +555,12 @@ async fn breeding_never_fills_a_generation_with_the_same_reviewer_twice() -> Res
             .map(|p| p.name.as_str())
             .collect();
         let unique: std::collections::HashSet<&&str> = names.iter().collect();
-        assert_eq!(unique.len(), names.len(), "duplicate reviewer in gen {}: {names:?}", gen.generation);
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "duplicate reviewer in gen {}: {names:?}",
+            gen.generation
+        );
 
         let ids: Vec<&str> = gen.personas.iter().map(|p| p.id.as_str()).collect();
         let unique_ids: std::collections::HashSet<&&str> = ids.iter().collect();
@@ -490,7 +595,10 @@ async fn a_mutant_that_reuses_its_parents_name_is_renamed_not_dropped() -> Resul
             "scripted"
         }
         async fn complete(&self, req: Request) -> Result<Response> {
-            if req.system.contains("You are tuning the reviewer population") {
+            if req
+                .system
+                .contains("You are tuning the reviewer population")
+            {
                 return Ok(Response {
                     text: r#"{"name":"contract breaker","focus":"f","prompt":"You read a change from the outside in, asking only whether the callers that existed yesterday still work today, and you prove it by naming one."}"#.into(),
                     usage: Usage::default(),
@@ -504,7 +612,12 @@ async fn a_mutant_that_reuses_its_parents_name_is_renamed_not_dropped() -> Resul
 
     let provider: locust_provider::SharedProvider = Arc::new(NameColliding(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     )));
 
     let arena = Arena::with_providers(cfg, vcs, vec![provider], silent())?;
@@ -518,9 +631,14 @@ async fn a_mutant_that_reuses_its_parents_name_is_renamed_not_dropped() -> Resul
 
     let names: Vec<&str> = g1.iter().map(|p| p.name.as_str()).collect();
     let unique: std::collections::HashSet<&&str> = names.iter().collect();
-    assert_eq!(unique.len(), names.len(), "names must be distinct: {names:?}");
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "names must be distinct: {names:?}"
+    );
     assert!(
-        g1.iter().any(|p| p.origin == locust_core::model::Origin::Mutant),
+        g1.iter()
+            .any(|p| p.origin == locust_core::model::Origin::Mutant),
         "the rewritten prompt was kept, not discarded: {names:?}"
     );
 
@@ -544,14 +662,20 @@ async fn a_split_panel_records_who_dissented_and_why() -> Result<()> {
             name: "skeptic".into(),
             provider: None,
             weight: 1.0,
-            traits: TraitConfig { preset: Some("skeptic".into()), ..Default::default() },
+            traits: TraitConfig {
+                preset: Some("skeptic".into()),
+                ..Default::default()
+            },
         },
         // Confirms everything (very high neuroticism).
         JudgeConfig {
             name: "paranoid".into(),
             provider: None,
             weight: 1.0,
-            traits: TraitConfig { preset: Some("paranoid".into()), ..Default::default() },
+            traits: TraitConfig {
+                preset: Some("paranoid".into()),
+                ..Default::default()
+            },
         },
         // Falls back to the scripted default, which confirms.
         JudgeConfig {
@@ -564,7 +688,12 @@ async fn a_split_panel_records_who_dissented_and_why() -> Result<()> {
 
     let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     ));
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
@@ -578,16 +707,26 @@ async fn a_split_panel_records_who_dissented_and_why() -> Result<()> {
     assert_eq!(ruling.tally(), (2, 3));
     assert!((ruling.dissent - 1.0 / 3.0).abs() < 1e-9);
     assert!(
-        ruling.panel.iter().any(|v| v.judge == "skeptic" && v.raw.verdict == Verdict::Refuted),
+        ruling
+            .panel
+            .iter()
+            .any(|v| v.judge == "skeptic" && v.raw.verdict == Verdict::Refuted),
         "the dissent is attributable to a named judge"
     );
 
     // A contested finding scores less than a unanimous one would.
-    let fit = gen.fitness.iter().find(|f| f.confirmed > 0).expect("someone scored");
+    let fit = gen
+        .fitness
+        .iter()
+        .find(|f| f.confirmed > 0)
+        .expect("someone scored");
     assert!(fit.score > 0.0);
 
     let md = locust_core::report::markdown(&outcome, &cfg);
-    assert!(md.contains("Where the panel split"), "the disagreement is reported");
+    assert!(
+        md.contains("Where the panel split"),
+        "the disagreement is reported"
+    );
     assert!(md.contains("skeptic"));
 
     std::fs::remove_dir_all(&repo).ok();
@@ -611,7 +750,12 @@ async fn a_single_judge_panel_is_unanimous_by_definition() -> Result<()> {
 
     let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 2, "compute result doubled without bounds checking", "local")],
+        vec![(
+            "src/pool.rs",
+            2,
+            "compute result doubled without bounds checking",
+            "local",
+        )],
     ));
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
@@ -625,7 +769,10 @@ async fn a_single_judge_panel_is_unanimous_by_definition() -> Result<()> {
         assert_eq!(r.dissent, 0.0);
     }
     let md = locust_core::report::markdown(&outcome, &cfg);
-    assert!(!md.contains("Where the panel split"), "nothing to split with one judge");
+    assert!(
+        !md.contains("Where the panel split"),
+        "nothing to split with one judge"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())
@@ -666,7 +813,9 @@ async fn a_run_that_cannot_judge_itself_neutrally_says_so() -> Result<()> {
 
     let warnings = warnings.lock().unwrap().clone();
     assert!(
-        warnings.iter().any(|w| w.contains("every agent and every judge is `alpha`")),
+        warnings
+            .iter()
+            .any(|w| w.contains("every agent and every judge is `alpha`")),
         "single-provider self-judging must be called out: {warnings:?}"
     );
     assert!(
@@ -745,7 +894,10 @@ async fn a_well_formed_run_raises_no_validity_warnings() -> Result<()> {
     arena.run().await?;
 
     let warnings = warnings.lock().unwrap().clone();
-    assert!(warnings.is_empty(), "nothing to warn about here: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "nothing to warn about here: {warnings:?}"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())
@@ -819,7 +971,10 @@ async fn partial_reviewer_failure_warns_about_the_smaller_population() -> Result
 
     let arena = Arena::with_providers(cfg, vcs, vec![a, b], reporter)?;
     let outcome = arena.run().await?;
-    assert!(!outcome.generations[0].findings.is_empty(), "the healthy half still reviewed");
+    assert!(
+        !outcome.generations[0].findings.is_empty(),
+        "the healthy half still reviewed"
+    );
 
     let warnings = warnings.lock().unwrap().clone();
     assert!(
@@ -863,7 +1018,12 @@ async fn a_late_generation_failing_still_reports_the_earlier_ones() -> Result<()
     let provider: locust_provider::SharedProvider =
         Arc::new(DiesAfterFirstGeneration(Scripted::new(
             "alpha",
-            vec![("src/pool.rs", 2, "compute result doubled without bounds", "local")],
+            vec![(
+                "src/pool.rs",
+                2,
+                "compute result doubled without bounds",
+                "local",
+            )],
         )));
 
     let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -875,14 +1035,26 @@ async fn a_late_generation_failing_still_reports_the_earlier_ones() -> Result<()
     });
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], reporter)?;
-    let outcome = arena.run().await.expect("the completed generation is still a result");
+    let outcome = arena
+        .run()
+        .await
+        .expect("the completed generation is still a result");
 
-    assert_eq!(outcome.generations.len(), 1, "generation 0 survived the later failure");
-    assert!(!outcome.confirmed_findings().is_empty(), "and its findings are reported");
+    assert_eq!(
+        outcome.generations.len(),
+        1,
+        "generation 0 survived the later failure"
+    );
+    assert!(
+        !outcome.confirmed_findings().is_empty(),
+        "and its findings are reported"
+    );
 
     let warnings = warnings.lock().unwrap().clone();
     assert!(
-        warnings.iter().any(|w| w.contains("generation(s) that completed")),
+        warnings
+            .iter()
+            .any(|w| w.contains("generation(s) that completed")),
         "the truncation must be stated: {warnings:?}"
     );
 
@@ -930,9 +1102,19 @@ async fn a_finding_citing_code_that_does_not_exist_is_marked() -> Result<()> {
             // Real line in a real file.
             ("src/pool.rs", 2, "a grounded defect in the change", "local"),
             // A file the change never touched and which does not exist.
-            ("src/imaginary.rs", 5, "a defect in a file that is not there", "local"),
+            (
+                "src/imaginary.rs",
+                5,
+                "a defect in a file that is not there",
+                "local",
+            ),
             // Real file, line far past its end.
-            ("src/pool.rs", 99999, "a defect at an impossible line", "local"),
+            (
+                "src/pool.rs",
+                99999,
+                "a defect at an impossible line",
+                "local",
+            ),
         ],
     ));
 
@@ -956,17 +1138,31 @@ async fn a_finding_citing_code_that_does_not_exist_is_marked() -> Result<()> {
     };
 
     assert_eq!(by_file("src/pool.rs", 2).grounding, Grounding::Verified);
-    assert_eq!(by_file("src/imaginary.rs", 5).grounding, Grounding::FileNotFound);
+    assert_eq!(
+        by_file("src/imaginary.rs", 5).grounding,
+        Grounding::FileNotFound
+    );
     assert!(matches!(
         by_file("src/pool.rs", 99999).grounding,
         Grounding::LineOutOfRange { cited: 99999, .. }
     ));
 
     // The reviewer's scorecard records it, and the run says so out loud.
-    let fitness: usize = outcome.generations[0].fitness.iter().map(|f| f.ungrounded).sum();
-    assert!(fitness >= 2, "ungrounded findings are counted against their author");
+    let fitness: usize = outcome.generations[0]
+        .fitness
+        .iter()
+        .map(|f| f.ungrounded)
+        .sum();
     assert!(
-        warnings.lock().unwrap().iter().any(|w| w.contains("could not be located")),
+        fitness >= 2,
+        "ungrounded findings are counted against their author"
+    );
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|w| w.contains("could not be located")),
         "the run must say that citations failed to resolve"
     );
 
@@ -992,15 +1188,30 @@ async fn excluded_files_are_absent_from_the_diff_itself() -> Result<()> {
     let range = vcs.range("main", "HEAD")?;
     let pack = locust_core::context::ContextPack::build(vcs.as_ref(), &range, &ctx)?;
 
-    assert!(!pack.files.iter().any(|f| f.path == "secrets.env"), "excluded from the file list");
-    assert!(!pack.diff.contains("hunter2-do-not-leak"), "secret leaked in the diff text");
-    assert!(!pack.diff.contains("secrets.env"), "excluded path leaked in the diff text");
-    assert!(!pack.diff.contains("Cargo.lock"), "default exclusion leaked");
+    assert!(
+        !pack.files.iter().any(|f| f.path == "secrets.env"),
+        "excluded from the file list"
+    );
+    assert!(
+        !pack.diff.contains("hunter2-do-not-leak"),
+        "secret leaked in the diff text"
+    );
+    assert!(
+        !pack.diff.contains("secrets.env"),
+        "excluded path leaked in the diff text"
+    );
+    assert!(
+        !pack.diff.contains("Cargo.lock"),
+        "default exclusion leaked"
+    );
 
     // And nothing about it survives into what agents are actually shown.
     let rendered = pack.render(true);
     assert!(!rendered.contains("hunter2-do-not-leak"));
-    assert!(rendered.contains("src/pool.rs"), "the real change is still there");
+    assert!(
+        rendered.contains("src/pool.rs"),
+        "the real change is still there"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())
@@ -1060,15 +1271,26 @@ async fn caveats_reach_the_durable_record_not_just_the_terminal() -> Result<()> 
 
     let provider: locust_provider::SharedProvider = Arc::new(Scripted::new(
         "alpha",
-        vec![("src/pool.rs", 99999, "cites a line that is not there", "local")],
+        vec![(
+            "src/pool.rs",
+            99999,
+            "cites a line that is not there",
+            "local",
+        )],
     ));
 
     let arena = Arena::with_providers(cfg.clone(), vcs, vec![provider], silent())?;
     let outcome = arena.run().await?;
 
-    assert!(!outcome.warnings.is_empty(), "warnings must survive into the outcome");
     assert!(
-        outcome.warnings.iter().any(|w| w.contains("every agent and every judge")),
+        !outcome.warnings.is_empty(),
+        "warnings must survive into the outcome"
+    );
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("every agent and every judge")),
         "the single-provider caveat is part of the record: {:?}",
         outcome.warnings
     );
@@ -1080,7 +1302,10 @@ async fn caveats_reach_the_durable_record_not_just_the_terminal() -> Result<()> 
     assert_eq!(back.warnings, outcome.warnings);
 
     let md = locust_core::report::markdown(&outcome, &cfg);
-    assert!(md.contains("Caveats from this run"), "and are rendered before the findings");
+    assert!(
+        md.contains("Caveats from this run"),
+        "and are rendered before the findings"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())
@@ -1115,7 +1340,12 @@ async fn confirmed_findings_are_ranked_for_a_reader() -> Result<()> {
         "alpha",
         vec![
             ("src/pool.rs", 2, "doubling is unchecked", "architectural"),
-            ("src/pool.rs", 40, "a wholly different local problem here", "local"),
+            (
+                "src/pool.rs",
+                40,
+                "a wholly different local problem here",
+                "local",
+            ),
         ],
     ));
 
@@ -1146,10 +1376,13 @@ async fn missing_judgments_cannot_pass_a_review() -> Result<()> {
         let repo = fixture_repo()?;
         let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
         let cfg = config(1, 1, &["alpha"]);
-        let mut provider = Scripted::new("alpha", vec![
-            ("src/pool.rs", 2, "arithmetic overflow", "local"),
-            ("src/pool.rs", 150, "unbounded resource retention", "module"),
-        ]);
+        let mut provider = Scripted::new(
+            "alpha",
+            vec![
+                ("src/pool.rs", 2, "arithmetic overflow", "local"),
+                ("src/pool.rs", 150, "unbounded resource retention", "module"),
+            ],
+        );
         provider.judge_limit = limit;
         provider.invalid_judge_ids = invalid;
         let arena = Arena::with_providers(cfg, vcs, vec![Arc::new(provider)], silent())?;
@@ -1162,22 +1395,28 @@ async fn missing_judgments_cannot_pass_a_review() -> Result<()> {
     Ok(())
 }
 
-
 #[tokio::test]
 async fn judgment_gaps_fail_across_batches_and_later_generations() -> Result<()> {
     struct Gap(Scripted, bool);
     #[async_trait]
     impl Provider for Gap {
-        fn name(&self) -> &str { self.0.name() }
-        fn model(&self) -> &str { self.0.model() }
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn model(&self) -> &str {
+            self.0.model()
+        }
         async fn complete(&self, req: Request) -> Result<Response> {
-            let gap = req.label.contains("judge") && if self.1 {
-                req.label.starts_with("gen1-")
-            } else {
-                req.label.ends_with("-b0")
-            };
+            let gap = req.label.contains("judge")
+                && if self.1 {
+                    req.label.starts_with("gen1-")
+                } else {
+                    req.label.ends_with("-b0")
+                };
             let mut response = self.0.complete(req).await?;
-            if gap { response.text = r#"{"rulings":[]}"#.into(); }
+            if gap {
+                response.text = r#"{"rulings":[]}"#.into();
+            }
             Ok(response)
         }
     }
@@ -1187,16 +1426,23 @@ async fn judgment_gaps_fail_across_batches_and_later_generations() -> Result<()>
         let mut cfg = config(if late { 2 } else { 1 }, 1, &["alpha"]);
         cfg.evolution.enabled = false;
         cfg.arena.judge_batch = 1;
-        let provider = Gap(Scripted::new("alpha", vec![
-            ("src/pool.rs", 2, "arithmetic overflow", "local"),
-            ("src/pool.rs", 150, "unbounded resource retention", "module"),
-        ]), late);
+        let provider = Gap(
+            Scripted::new(
+                "alpha",
+                vec![
+                    ("src/pool.rs", 2, "arithmetic overflow", "local"),
+                    ("src/pool.rs", 150, "unbounded resource retention", "module"),
+                ],
+            ),
+            late,
+        );
         let arena = Arena::with_providers(cfg, vcs, vec![Arc::new(provider)], silent())?;
         let err = arena.run().await.unwrap_err().to_string();
         assert!(err.contains("incomplete judgment"), "{err}");
         if late {
-            let saved: locust_core::RunOutcome = serde_json::from_str(
-                &std::fs::read_to_string(arena.run_dir().join("report.json"))?)?;
+            let saved: locust_core::RunOutcome = serde_json::from_str(&std::fs::read_to_string(
+                arena.run_dir().join("report.json"),
+            )?)?;
             assert_eq!(saved.generations.len(), 1, "completed work survives");
         }
         std::fs::remove_dir_all(repo).ok();
@@ -1216,17 +1462,34 @@ async fn every_cli_phase_uses_the_target_checkout_and_wrapper_workspace() -> Res
     }
     #[async_trait]
     impl Provider for CheckedCli {
-        fn name(&self) -> &str { self.scripted.name() }
-        fn model(&self) -> &str { self.scripted.model() }
-        fn needs_workspace(&self) -> bool { true }
+        fn name(&self) -> &str {
+            self.scripted.name()
+        }
+        fn model(&self) -> &str {
+            self.scripted.model()
+        }
+        fn needs_workspace(&self) -> bool {
+            true
+        }
         async fn complete(&self, req: Request) -> Result<Response> {
             let workspace = req.workspace.as_ref().expect("every phase has a workspace");
             let checked = self.cli.complete(req.clone()).await?;
             let lines: Vec<_> = checked.text.lines().collect();
             assert_eq!(lines.len(), 3);
-            assert_eq!(Path::new(lines[0]).canonicalize()?, workspace.canonicalize()?);
-            assert_eq!(lines[1], self.target.trim(), "{} inspected the wrong revision", req.label);
-            assert_eq!(Path::new(lines[2]).canonicalize()?, workspace.canonicalize()?);
+            assert_eq!(
+                Path::new(lines[0]).canonicalize()?,
+                workspace.canonicalize()?
+            );
+            assert_eq!(
+                lines[1],
+                self.target.trim(),
+                "{} inspected the wrong revision",
+                req.label
+            );
+            assert_eq!(
+                Path::new(lines[2]).canonicalize()?,
+                workspace.canonicalize()?
+            );
             self.phases.lock().unwrap().push(req.label.clone());
             self.scripted.complete(req).await
         }
@@ -1238,20 +1501,38 @@ async fn every_cli_phase_uses_the_target_checkout_and_wrapper_workspace() -> Res
     let mut cfg = config(2, 2, &["alpha"]);
     cfg.run.target = "feature".into();
     cfg.run.workspaces = locust_core::config::WorkspacePolicy::Auto;
-    let cli = CliProvider::new(locust_provider::ProviderSettings { timeout_secs: 5, ..Default::default() }, CliSpec {
-        command: vec!["sh".into(), "-c".into(), "pwd; git rev-parse HEAD; printf '%s\\n' \"$LOCUST_TEST_WORKSPACE\"".into()],
-        stdin: None, extract: Extract::Raw, usage_path: None, env: Default::default(),
-        wrapper: vec!["env".into(), "LOCUST_TEST_WORKSPACE={workspace}".into()],
-    })?;
+    let cli = CliProvider::new(
+        locust_provider::ProviderSettings {
+            timeout_secs: 5,
+            ..Default::default()
+        },
+        CliSpec {
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "pwd; git rev-parse HEAD; printf '%s\\n' \"$LOCUST_TEST_WORKSPACE\"".into(),
+            ],
+            stdin: None,
+            extract: Extract::Raw,
+            usage_path: None,
+            env: Default::default(),
+            wrapper: vec!["env".into(), "LOCUST_TEST_WORKSPACE={workspace}".into()],
+        },
+    )?;
     let provider = Arc::new(CheckedCli {
         scripted: Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect", "local")]),
-        cli, target, phases: Mutex::new(Vec::new()),
+        cli,
+        target,
+        phases: Mutex::new(Vec::new()),
     });
     let arena = Arena::with_providers(cfg, vcs, vec![provider.clone()], silent())?;
     arena.run().await?;
     let phases = provider.phases.lock().unwrap();
     for phase in ["-atk-", "-def-", "-judge", "synthesis", "/mutate/"] {
-        assert!(phases.iter().any(|label| label.contains(phase)), "missing {phase}: {phases:?}");
+        assert!(
+            phases.iter().any(|label| label.contains(phase)),
+            "missing {phase}: {phases:?}"
+        );
     }
     std::fs::remove_dir_all(repo).ok();
     Ok(())
@@ -1344,15 +1625,24 @@ async fn a_late_coverage_failure_still_reports_completed_generations() -> Result
 
     // Generation 0 was judged, scored and written. That work must stay
     // readable rather than being thrown away to report a later failure.
-    assert!(run_dir.join("gen-0/rulings.json").exists(), "generation 0 was written");
+    assert!(
+        run_dir.join("gen-0/rulings.json").exists(),
+        "generation 0 was written"
+    );
     assert!(
         run_dir.join("report.md").exists(),
         "no report, so the completed generation is unreadable: {:?}",
         result.as_ref().err().map(|e| e.to_string())
     );
     let report = std::fs::read_to_string(run_dir.join("report.md"))?;
-    assert!(report.contains("Caveats from this run"), "and it carries the caveat");
-    assert!(report.contains("incomplete judgment"), "naming what went wrong: {report:.400}");
+    assert!(
+        report.contains("Caveats from this run"),
+        "and it carries the caveat"
+    );
+    assert!(
+        report.contains("incomplete judgment"),
+        "naming what went wrong: {report:.400}"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
     Ok(())

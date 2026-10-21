@@ -57,7 +57,9 @@ impl Traits {
     }
 
     pub fn is_neutral(&self) -> bool {
-        Axis::ALL.iter().all(|a| Band::of(self.get(*a)) == Band::Neutral)
+        Axis::ALL
+            .iter()
+            .all(|a| Band::of(self.get(*a)) == Band::Neutral)
     }
 
     pub fn get(&self, axis: Axis) -> f64 {
@@ -140,8 +142,15 @@ impl Traits {
         Some(t)
     }
 
-    pub const PRESETS: &'static [&'static str] =
-        &["neutral", "stickler", "pragmatist", "architect", "paranoid", "skeptic", "advocate"];
+    pub const PRESETS: &'static [&'static str] = &[
+        "neutral",
+        "stickler",
+        "pragmatist",
+        "architect",
+        "paranoid",
+        "skeptic",
+        "advocate",
+    ];
 
     /// Prompt text for the non-neutral traits, in the given voice. Returns an
     /// empty string for a neutral temperament: an agent that sets no traits
@@ -366,7 +375,10 @@ mod tests {
         t.neuroticism = 0.95;
         let text = t.render(Voice::Judge);
         assert!(text.contains("Treat uncertainty as danger"));
-        assert!(!text.contains("benefit of the doubt"), "agreeableness is neutral: {text}");
+        assert!(
+            !text.contains("benefit of the doubt"),
+            "agreeableness is neutral: {text}"
+        );
         assert_eq!(t.summary(), "N95");
     }
 
@@ -438,8 +450,14 @@ mod tests {
     fn every_non_neutral_band_has_text_in_both_voices() {
         for axis in Axis::ALL {
             for band in [Band::VeryLow, Band::Low, Band::High, Band::VeryHigh] {
-                assert!(!judge_text(axis, band).is_empty(), "judge {axis:?} {band:?}");
-                assert!(!reviewer_text(axis, band).is_empty(), "reviewer {axis:?} {band:?}");
+                assert!(
+                    !judge_text(axis, band).is_empty(),
+                    "judge {axis:?} {band:?}"
+                );
+                assert!(
+                    !reviewer_text(axis, band).is_empty(),
+                    "reviewer {axis:?} {band:?}"
+                );
             }
         }
     }
@@ -456,8 +474,14 @@ mod tests {
     #[test]
     fn temperature_moves_with_openness_and_against_rigour() {
         let base = 0.5;
-        let open = Traits { openness: 1.0, ..Traits::NEUTRAL };
-        let rigorous = Traits { conscientiousness: 1.0, ..Traits::NEUTRAL };
+        let open = Traits {
+            openness: 1.0,
+            ..Traits::NEUTRAL
+        };
+        let rigorous = Traits {
+            conscientiousness: 1.0,
+            ..Traits::NEUTRAL
+        };
         assert!(open.temperature(base) > base);
         assert!(rigorous.temperature(base) < base);
         assert_eq!(Traits::NEUTRAL.temperature(base), base);
@@ -468,7 +492,12 @@ mod tests {
 
     #[test]
     fn values_outside_the_range_are_clamped_not_trusted() {
-        let t = Traits { openness: 5.0, neuroticism: -3.0, ..Traits::NEUTRAL }.clamped();
+        let t = Traits {
+            openness: 5.0,
+            neuroticism: -3.0,
+            ..Traits::NEUTRAL
+        }
+        .clamped();
         assert_eq!(t.openness, 1.0);
         assert_eq!(t.neuroticism, 0.0);
     }

@@ -23,32 +23,51 @@ fn cases_dir() -> PathBuf {
 
 /// `(case, defect, file, line, title, claim)` — the claim is where the
 /// keywords live, and is written as prose a reviewer would actually produce.
-type Sample = (&'static str, &'static str, &'static str, u32, &'static str, &'static str);
+type Sample = (
+    &'static str,
+    &'static str,
+    &'static str,
+    u32,
+    &'static str,
+    &'static str,
+);
 
 const SAMPLES: &[Sample] = &[
     // --- retry-budget ----------------------------------------------------
     (
-        "retry-budget", "retries-non-idempotent", "src/lib.rs", 56,
+        "retry-budget",
+        "retries-non-idempotent",
+        "src/lib.rs",
+        56,
         "send() retries writes that are not idempotent",
         "send() retries on any Err regardless of req.method. A POST to /charges whose response \
          was lost is replayed up to three more times, and the payments API has no idempotency \
          key, so one authorisation becomes four charges.",
     ),
     (
-        "retry-budget", "budget-never-replenished", "src/lib.rs", 65,
+        "retry-budget",
+        "budget-never-replenished",
+        "src/lib.rs",
+        65,
         "The retry budget is process-wide and never refilled",
         "budget is one AtomicU32 per Client shared by every task in the worker, and nothing ever \
          refills it. After a bad spell spends the 100 retries, no request in that process is \
          retried again for the lifetime of the worker.",
     ),
     (
-        "retry-budget", "budget-exhaustion-wraps", "src/lib.rs", 65,
+        "retry-budget",
+        "budget-exhaustion-wraps",
+        "src/lib.rs",
+        65,
         "fetch_sub on an exhausted budget wraps",
         "Once the budget reaches zero, fetch_sub(1) wraps to u32::MAX, so the exhausted state \
          lasts exactly one call before four billion retries become available again.",
     ),
     (
-        "retry-budget", "retries-client-errors", "src/lib.rs", 61,
+        "retry-budget",
+        "retries-client-errors",
+        "src/lib.rs",
+        61,
         "Deterministic client errors are retried",
         "The Err arm does not look at the error at all, so Error::Status(400) and Status(404) \
          are retried three times each. A request the server has already rejected on its merits \
@@ -56,34 +75,49 @@ const SAMPLES: &[Sample] = &[
          reports the failure 350ms later than it could.",
     ),
     (
-        "retry-budget", "timeout-is-per-attempt", "src/lib.rs", 56,
+        "retry-budget",
+        "timeout-is-per-attempt",
+        "src/lib.rs",
+        56,
         "The caller's timeout now bounds one attempt, not the call",
         "The doc comment still promises that the caller's timeout bounds the call, but the same \
          timeout is handed to every attempt. A caller asking for two seconds can now wait four \
          timeouts plus 350ms of backoff before it hears anything.",
     ),
     (
-        "permission-check", "middleware-treats-raiser-as-predicate", "src/middleware.py", 8,
+        "permission-check",
+        "middleware-treats-raiser-as-predicate",
+        "src/middleware.py",
+        8,
         "authorize() still treats the permission check as a predicate",
         "check_permission() returns None and signals refusal by raising, but authorize() tests \
          its result. `not None` is True, so every request that should be allowed is answered \
          403, and a request that should be refused raises out of the middleware instead.",
     ),
     (
-        "permission-check", "denial-swallowed-in-save-invoice", "src/api.py", 18,
+        "permission-check",
+        "denial-swallowed-in-save-invoice",
+        "src/api.py",
+        18,
         "The permission denial is logged and discarded",
         "save_invoice() wraps the check in `except Exception` and only writes a log line, so a \
          refusal is swallowed and the function returns normally. Any caller that reaches the \
          endpoint can write an invoice.",
     ),
     (
-        "permission-check", "write-precedes-the-check", "src/api.py", 15,
+        "permission-check",
+        "write-precedes-the-check",
+        "src/api.py",
+        15,
         "The invoice is written before the permission is checked",
         "store.write(invoice) happens before check_permission() is called, so even a denial \
          that propagated correctly would arrive after the row was persisted.",
     ),
     (
-        "permission-check", "cache-keyed-on-user-alone", "src/permissions.py", 25,
+        "permission-check",
+        "cache-keyed-on-user-alone",
+        "src/permissions.py",
+        25,
         "The permission cache key ignores the permission",
         "The cache key is user.id alone, so the answer to the first permission asked about a \
          user is returned for every later one. A viewer passing invoice:read then passes \
@@ -128,7 +162,9 @@ fn every_sample_report_lands_on_its_own_defect() {
             case.manifest.defects.iter().any(|d| d.id == *defect_id),
             "`{case_name}` has no defect `{defect_id}`"
         );
-        let expected = Classified::Real { defect: defect_id.to_string() };
+        let expected = Classified::Real {
+            defect: defect_id.to_string(),
+        };
 
         let f = finding(file, *line, title, claim);
         assert_eq!(
@@ -160,7 +196,9 @@ fn every_planted_defect_has_a_sample_report() {
                 continue;
             }
             assert!(
-                SAMPLES.iter().any(|(c, d, ..)| *c == case.manifest.name && *d == defect.id),
+                SAMPLES
+                    .iter()
+                    .any(|(c, d, ..)| *c == case.manifest.name && *d == defect.id),
                 "`{}` / `{}` has no sample report",
                 case.manifest.name,
                 defect.id
@@ -175,9 +213,17 @@ fn every_planted_defect_has_a_sample_report() {
 #[test]
 fn every_case_in_the_directory_loads() {
     let cases = Case::discover(&cases_dir()).expect("cases load");
-    assert!(cases.len() >= 3, "expected at least three cases, found {}", cases.len());
+    assert!(
+        cases.len() >= 3,
+        "expected at least three cases, found {}",
+        cases.len()
+    );
     for case in &cases {
-        assert!(case.real().count() > 0, "`{}` plants no defect", case.manifest.name);
+        assert!(
+            case.real().count() > 0,
+            "`{}` plants no defect",
+            case.manifest.name
+        );
     }
 }
 
@@ -192,8 +238,15 @@ fn every_case_in_the_directory_loads() {
 ///
 /// `(case, expected defect or None for a deliberate straddle, file, line,
 ///  title, claim, failure scenario)`
-type LiveSample =
-    (&'static str, Option<&'static str>, &'static str, u32, &'static str, &'static str, &'static str);
+type LiveSample = (
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    u32,
+    &'static str,
+    &'static str,
+    &'static str,
+);
 
 const FROM_THE_LIVE_RUN: &[LiveSample] = &[
     (
@@ -250,7 +303,9 @@ fn the_findings_the_arena_actually_produced_land_where_they_should() {
         match expected_id {
             Some(id) => assert_eq!(
                 classify(&f, &case.manifest.defects),
-                Classified::Real { defect: id.to_string() },
+                Classified::Real {
+                    defect: id.to_string()
+                },
                 "`{case_name}`: {title}"
             ),
             // The straddle: one finding describing two planted defects. It
@@ -270,7 +325,10 @@ fn the_findings_the_arena_actually_produced_land_where_they_should() {
                 ids.sort_unstable();
                 assert_eq!(
                     ids,
-                    ["denial-swallowed-in-save-invoice", "write-precedes-the-check"],
+                    [
+                        "denial-swallowed-in-save-invoice",
+                        "write-precedes-the-check"
+                    ],
                     "the straddle must name both defects it describes"
                 );
             }
