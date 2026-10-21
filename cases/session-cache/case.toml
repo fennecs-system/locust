@@ -8,11 +8,8 @@ read on every authenticated request, so reads vastly outnumber writes and the
 store is shared across request threads.
 """
 
-# ---------------------------------------------------------------- real -----
-
 [[defect]]
 id = "hits-entries-desync"
-kind = "real"
 file = "src/cache.py"
 lines = [20, 40]
 severity = "high"
@@ -24,7 +21,6 @@ matches = ["_hits", "KeyError"]
 
 [[defect]]
 id = "unlocked-read-write"
-kind = "real"
 file = "src/cache.py"
 lines = [15, 30]
 severity = "high"
@@ -38,7 +34,6 @@ matches = ["get()", "lock"]
 
 [[defect]]
 id = "lfu-not-lru"
-kind = "real"
 file = "src/cache.py"
 lines = [6, 45]
 severity = "medium"
@@ -51,7 +46,6 @@ matches = ["lru"]
 
 [[defect]]
 id = "put-resets-hit-count"
-kind = "real"
 file = "src/cache.py"
 lines = [31, 40]
 severity = "medium"
@@ -69,7 +63,6 @@ matches = ["_hits[key] = 0"]
 
 [[defect]]
 id = "put-evicts-on-update"
-kind = "real"
 file = "src/cache.py"
 lines = [28, 36]
 severity = "medium"
@@ -84,7 +77,6 @@ matches = ["put()", "evict", "updat"]
 
 [[defect]]
 id = "purge-deletes-refreshed-session"
-kind = "real"
 file = "src/cache.py"
 lines = [44, 49]
 severity = "high"
@@ -96,38 +88,12 @@ prevents a dictionary-iteration exception, but does not protect replacements.
 """
 matches = ["purge_expired()", "refresh", "snapshot"]
 
-# --------------------------------------------------------------- decoys ----
-#
-# Written to look wrong. An attacker should raise these; a defender that is
-# paying attention refutes them. A confirmed decoy means nobody checked.
-
-[[defect]]
-id = "size-race"
-kind = "decoy"
-file = "src/cache.py"
-lines = [42, 46]
-severity = "low"
-summary = "size() reads len(self._entries) without the lock, which looks like a data race."
-why_safe = """
-len() on a dict is atomic under the GIL, and the comment states callers only
-compare the result against zero, so a stale count cannot change any decision.
-Raising this requires ignoring the stated usage.
-"""
-matches = ["size()", "lock"]
-
-[[defect]]
-id = "purge-mutation-during-iteration"
-kind = "decoy"
-file = "src/cache.py"
-lines = [47, 55]
-severity = "medium"
-summary = """
-purge_expired() appears to mutate _entries while iterating it, the classic
-RuntimeError: dictionary changed size during iteration.
-"""
-why_safe = """
-The comprehension iterates list(self._entries.items()), which is a snapshot
-taken before any mutation. The deletions happen afterwards over that list, and
-pop(k, None) tolerates a key another thread already removed.
-"""
-matches = ["purge_expired()", "dictionary changed size"]
+# Two further claims about this file are *false* and are deliberately not
+# planted here: that `size()` racing a writer can produce an inconsistent
+# count, and that `purge_expired()` mutates the dict it iterates. Reviewers
+# never raised either in a live run — six planted decoys across three cases
+# drew nothing — so they stopped being an answer-key entry and became probe
+# input. They now live in `crates/locust-core/tests/defence_probe.rs`, which
+# feeds them to the defence directly instead of waiting for an attacker to
+# take the bait. The code they are about stays here, because it is ordinary
+# code: a size accessor and a snapshotting sweep.

@@ -1,0 +1,88 @@
+name = "retry-budget"
+language = "rust"
+description = "Adds retries with exponential backoff and a shared retry budget to the payments client."
+
+notes = """
+This client is used by the billing workers to reach the payments API. One
+`Client` is constructed per worker process and shared by every task in it.
+`Request::method` carries the HTTP verb; the payments API has no idempotency
+keys.
+"""
+
+[[defect]]
+id = "retries-non-idempotent"
+file = "src/lib.rs"
+lines = [53, 76]
+severity = "critical"
+summary = """
+send() retries every request regardless of method. A POST whose response was
+lost is sent again, so a charge that already landed is applied up to four
+times. Nothing in the client or the API makes the write idempotent.
+"""
+matches = ["idempot"]
+
+# Two defects, not one. Either would be a bug without the other: a budget that
+# is never restored breaks later callers even if the arithmetic is right, and
+# the wrap is wrong even if the budget were refilled. They are keyed apart by
+# `never` and `wrap` because every report of one uses one of those words and
+# not the other -- a report naming both mechanisms matches both entries and
+# lands in triage, which is where a finding that is really two belongs.
+[[defect]]
+id = "budget-never-replenished"
+file = "src/lib.rs"
+lines = [46, 70]
+severity = "high"
+summary = """
+The budget is a single counter per client, consumed by every caller and never
+replenished. Once a bad spell spends it, no request in that process retries
+again for the lifetime of the worker — including the transient failures the
+budget exists to absorb.
+"""
+matches = ["budget", "never"]
+
+[[defect]]
+id = "budget-exhaustion-wraps"
+file = "src/lib.rs"
+lines = [60, 70]
+severity = "high"
+summary = """
+fetch_sub(1) against a zero budget wraps to u32::MAX and returns 0, so exactly
+one caller is refused and the next sees four billion retries available. The
+`== 0` guard therefore un-exhausts the budget it is checking.
+"""
+matches = ["budget", "wrap"]
+
+[[defect]]
+id = "retries-client-errors"
+file = "src/lib.rs"
+lines = [56, 70]
+severity = "medium"
+summary = """
+Every Err is retried, including Error::Status(400) and other deterministic
+client errors that cannot succeed on a second attempt. The client turns one
+rejected request into four, and quadruples the latency of reporting a failure
+the caller could have been told about immediately.
+"""
+matches = ["status", "retr"]
+
+[[defect]]
+id = "timeout-is-per-attempt"
+file = "src/lib.rs"
+lines = [51, 71]
+severity = "medium"
+summary = """
+The doc comment still says the caller's timeout bounds the call, but the
+timeout is now passed to each attempt. Worst case is four timeouts plus 350ms
+of backoff, so a caller asking for a 2-second bound can wait more than eight.
+"""
+# `["timeout", "attempt"]` was too loose: every finding about a retry loop
+# mentions both words in passing. This defect is about the *contract* the doc
+# comment still states, and a report of it says so.
+matches = ["timeout", "bound"]
+
+# Two further claims about this file are *false* and are deliberately not
+# planted here: that `1 << shift` can overflow (it is capped at 6), and that
+# the `Relaxed` success counter can lose or reorder counts (it publishes no
+# other memory). They are probe input, not manifest entries — see
+# `crates/locust-core/tests/defence_probe.rs` and the decoy tests in
+# `ground_truth/`, which prove both are safe.

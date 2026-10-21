@@ -974,13 +974,31 @@ mod tests {
         assert!(err.contains("unknown trait preset"), "got: {err}");
     }
 
+    /// One judge by default: the three-temperament panel never changed a
+    /// verdict in the measurement that justified it, and it costs three times
+    /// as much. See `seeds::default_panel`.
     #[test]
-    fn the_default_panel_is_three_contrasting_judges() {
+    fn the_default_panel_is_a_single_neutral_judge() {
         let cfg = Config::default();
+        let panel = cfg.panel().unwrap();
+        assert_eq!(panel.len(), 1);
+        assert!(panel[0].traits.is_neutral(), "an unconfigured judge states no temperament");
+    }
+
+    /// Declaring judges replaces the default entirely, and the contrasting
+    /// presets must still differ — a panel of identical temperaments produces
+    /// no dissent and is pure cost.
+    #[test]
+    fn a_declared_panel_replaces_the_default_and_its_presets_differ() {
+        let cfg: Config = toml::from_str(
+            "[[judge]]\nname = \"stickler\"\npreset = \"stickler\"\n\
+             [[judge]]\nname = \"pragmatist\"\npreset = \"pragmatist\"\n\
+             [[judge]]\nname = \"architect\"\npreset = \"architect\"\n",
+        )
+        .unwrap();
         let panel = cfg.panel().unwrap();
         assert_eq!(panel.len(), 3);
         assert!(panel.iter().all(|j| !j.traits.is_neutral()), "a neutral panel measures nothing");
-        // They must actually differ, or the spread is meaningless.
         assert_ne!(panel[0].traits, panel[1].traits);
         assert_ne!(panel[1].traits, panel[2].traits);
     }

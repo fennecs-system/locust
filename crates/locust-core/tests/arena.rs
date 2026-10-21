@@ -678,6 +678,46 @@ async fn a_run_that_cannot_judge_itself_neutrally_says_so() -> Result<()> {
     Ok(())
 }
 
+/// One judge is the default, so saying so on every run is noise. It is worth
+/// saying only when the config has tuned something a single judge makes inert:
+/// `consensus_weight` scales a verdict by panel dissent, and there is none.
+#[tokio::test]
+async fn consensus_weight_is_called_out_when_a_single_judge_makes_it_inert() -> Result<()> {
+    let repo = fixture_repo()?;
+    let vcs: Arc<dyn locust_vcs::Vcs> = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
+    let mut cfg = config(1, 2, &["alpha", "beta"]);
+    cfg.arena.judge = None;
+    assert_eq!(cfg.panel()?.len(), 1, "the default panel is one judge");
+    cfg.scoring.consensus_weight = 0.9;
+
+    let a: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("alpha", vec![("src/pool.rs", 2, "a defect alpha", "local")]).refuting(),
+    );
+    let b: locust_provider::SharedProvider = Arc::new(
+        Scripted::new("beta", vec![("src/pool.rs", 60, "a defect beta", "local")]).refuting(),
+    );
+
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    let reporter: locust_core::Reporter = Arc::new(move |e: Event| {
+        if let Event::Warning { message } = e {
+            sink.lock().unwrap().push(message);
+        }
+    });
+
+    let arena = Arena::with_providers(cfg, vcs, vec![a, b], reporter)?;
+    arena.run().await?;
+
+    let warnings = warnings.lock().unwrap().clone();
+    assert!(
+        warnings.iter().any(|w| w.contains("consensus_weight")),
+        "a setting that does nothing must be called out: {warnings:?}"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+    Ok(())
+}
+
 /// The inverse: a healthy configuration must not nag.
 #[tokio::test]
 async fn a_well_formed_run_raises_no_validity_warnings() -> Result<()> {
@@ -1122,38 +1162,6 @@ async fn missing_judgments_cannot_pass_a_review() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn only_refuted_decoys_receive_defence_credit() -> Result<()> {
-    use locust_core::bench::{Case, CaseManifest, Defect, DefectKind, Scorecard};
-    let repo = fixture_repo()?;
-    let vcs = Arc::from(locust_vcs::detect(&repo, Some("git"))?);
-    let cfg = config(1, 1, &["alpha"]);
-    let provider = Scripted::new("alpha", vec![("src/pool.rs", 2, "false alarm", "local")]).refuting();
-    let arena = Arena::with_providers(cfg.clone(), vcs, vec![Arc::new(provider)], silent())?;
-    let mut outcome = arena.run().await?;
-    let case = Case {
-        dir: repo.clone(),
-        manifest: CaseManifest {
-            name: "test".into(), description: String::new(), language: String::new(), notes: String::new(),
-            defects: vec![Defect {
-                id: "decoy".into(), kind: DefectKind::Decoy, file: "src/pool.rs".into(),
-                lines: None, severity: Severity::Low, summary: "false alarm".into(),
-                matches: vec!["false alarm".into()], why_safe: "safe".into(),
-            }],
-        },
-    };
-    assert_eq!(Scorecard::build(&case, &outcome).decoys_caught, vec!["decoy"]);
-    outcome.generations[0].rulings[0].raw.verdict = Verdict::Undecided;
-    let card = Scorecard::build(&case, &outcome);
-    assert!(card.decoys_caught.is_empty());
-    assert_eq!(card.decoy_resistance(), None);
-    let md = locust_core::report::markdown(&outcome, &cfg);
-    assert!(!md.contains("Every finding raised was refuted"));
-    outcome.generations[0].rulings.clear();
-    assert!(Scorecard::build(&case, &outcome).decoys_caught.is_empty());
-    std::fs::remove_dir_all(repo).ok();
-    Ok(())
-}
 
 #[tokio::test]
 async fn judgment_gaps_fail_across_batches_and_later_generations() -> Result<()> {

@@ -130,6 +130,12 @@ enum Command {
         /// List the cases and what they plant, without running anything.
         #[arg(long)]
         list: bool,
+        /// Re-score a stored run against the current manifests instead of
+        /// running the arena. Takes a run directory containing report.json.
+        /// Costs nothing, and is how a manifest fix is checked against the
+        /// findings that exposed it.
+        #[arg(long, value_name = "RUN_DIR")]
+        replay: Option<PathBuf>,
     },
 
     /// Remove agent worktrees left behind by an interrupted run.
@@ -184,7 +190,10 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { force } => init::write_config(&repo, force),
 
-        Command::Bench { case, cases_dir, generations, attackers, json, list } => {
+        Command::Bench { case, cases_dir, generations, attackers, json, list, replay } => {
+            if let Some(dir) = replay {
+                return replay_bench(&cases_dir, case.as_deref(), &dir, json);
+            }
             let cfg = load_config(&cli.config, &repo)?;
             bench(&cfg, &cases_dir, case.as_deref(), generations, attackers, json, list, cli.verbose)
                 .await
@@ -285,6 +294,96 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// Re-score runs that are already on disk.
+///
+/// A manifest is an answer key, and the two times this one was wrong the
+/// evidence was a stored run whose findings it mis-filed. Re-running the arena
+/// to check a keyword fix costs real money and produces different findings, so
+/// it cannot answer the question. This replays the exact findings through the
+/// current `classify`.
+///
+/// `RUN_DIR` is either one run directory or a parent of several; each must
+/// hold a `report.json`. The case is taken from `--case`, or from the name of
+/// the directory two levels above the run when it matches one.
+fn replay_bench(
+    cases_dir: &std::path::Path,
+    only: Option<&str>,
+    dir: &std::path::Path,
+    json: bool,
+) -> Result<()> {
+    use locust_core::bench::{Case, Scorecard};
+    use locust_core::model::RunOutcome;
+
+    // A bench workdir nests the reports four levels down
+    // (`<case>/.locust/runs/<run-id>/`), so search rather than guess. Bounded
+    // because a mistyped path should fail, not crawl a home directory.
+    fn collect(dir: &std::path::Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let report = dir.join("report.json");
+        if report.is_file() {
+            out.push(report);
+            return;
+        }
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut dirs: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        for d in dirs {
+            collect(&d, depth - 1, out);
+        }
+    }
+
+    let mut reports: Vec<PathBuf> = Vec::new();
+    collect(dir, 5, &mut reports);
+    if reports.is_empty() {
+        bail!("no report.json under {} (searched five levels)", dir.display());
+    }
+
+    let cases = Case::discover(cases_dir)?;
+    let mut cards = Vec::new();
+    for report in &reports {
+        let text = std::fs::read_to_string(report)
+            .with_context(|| format!("reading {}", report.display()))?;
+        let outcome: RunOutcome = serde_json::from_str(&text)
+            .with_context(|| format!("parsing {}", report.display()))?;
+
+        // `.locust/runs/<run-id>/report.json` sits four levels below the
+        // repository the bench materialised, which is named for the case.
+        let inferred = report
+            .ancestors()
+            .nth(4)
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        let name = only.map(str::to_string).or(inferred);
+        let Some(case) = cases
+            .iter()
+            .find(|c| Some(&c.manifest.name) == name.as_ref())
+        else {
+            eprintln!(
+                "  {} {}: no case matches `{}`",
+                term::yellow("skipped"),
+                report.display(),
+                name.as_deref().unwrap_or("?")
+            );
+            continue;
+        };
+        eprintln!(
+            "{} {} from {}",
+            term::bold("replay"),
+            case.manifest.name,
+            report.display()
+        );
+        cards.push(Scorecard::build(case, &outcome));
+    }
+    if cards.is_empty() {
+        bail!("nothing to replay: no stored run matched a known case");
+    }
+    print_scorecards(&cards, json)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn bench(
     cfg: &Config,
@@ -314,10 +413,7 @@ async fn bench(
                 term::dim(&c.manifest.description)
             );
             for d in &c.manifest.defects {
-                let tag = match d.kind {
-                    locust_core::bench::DefectKind::Real => term::red("real "),
-                    locust_core::bench::DefectKind::Decoy => term::cyan("decoy"),
-                };
+                let tag = term::red("defect");
                 // One line each: summaries are paragraphs in the manifest.
                 let gist = d.summary.split_whitespace().collect::<Vec<_>>().join(" ");
                 let gist: String = gist.chars().take(88).collect();
@@ -359,60 +455,40 @@ async fn bench(
         }
     }
 
+    print_scorecards(&cards, json)
+}
+
+/// The scorecard table and per-case detail, shared by a live run and a replay.
+fn print_scorecards(cards: &[locust_core::bench::Scorecard], json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&cards)?);
+        println!("{}", serde_json::to_string_pretty(cards)?);
         return Ok(());
     }
 
     println!("\n{}", term::bold("benchmark"));
     println!(
-        "\n{:<18} {:>8} {:>10} {:>10} {:>8} {:>8}",
-        "case", "recall", "decoys", "pushback", "conf", "cost"
+        "\n{:<18} {:>10} {:>10} {:>10} {:>8}",
+        "case", "recall", "pushback", "conf", "cost"
     );
-    println!("{}", "-".repeat(66));
-    for c in &cards {
+    println!("{}", "-".repeat(60));
+    for c in cards {
         println!(
-            "{:<18} {:>7.0}% {:>9} {:>9.0}% {:>8} {:>8}",
+            "{:<18} {:>10} {:>9.0}% {:>10} {:>8}",
             c.case,
-            c.recall() * 100.0,
-            match c.decoy_resistance() {
-                Some(_) => format!("{}/{}", c.decoys_caught.len(), c.decoys_caught.len() + c.decoys_confirmed.len()),
-                None => "untested".into(),
-            },
+            format!("{}/{} ({:.0}%)", c.real_found.len(), c.real_planted, c.recall() * 100.0),
             c.defence_pushback() * 100.0,
             c.findings_confirmed,
             if c.cost_usd > 0.0 { format!("${:.2}", c.cost_usd) } else { "—".into() },
         );
     }
 
-    for c in &cards {
+    for c in cards {
         println!("\n{} {}", term::bold(&c.case), term::dim("detail"));
         if !c.real_missed.is_empty() {
             println!("  {} {}", term::red("missed"), c.real_missed.join(", "));
         }
-        if !c.decoys_confirmed.is_empty() {
-            println!(
-                "  {} {} {}",
-                term::red("confirmed decoy"),
-                c.decoys_confirmed.join(", "),
-                term::dim("(the defence let a non-defect through)")
-            );
-        }
-        if c.decoys_untested() > 0 {
-            println!(
-                "  {} {} decoy(s) without a decisive ruling {}",
-                term::yellow("untested"),
-                c.decoys_untested(),
-                term::dim("(unraised, unjudged, or undecided)")
-            );
-        }
-        if !c.decoys_caught.is_empty() {
-            println!(
-                "  {} {} {}",
-                term::green("caught decoy"),
-                c.decoys_caught.join(", "),
-                term::dim("(raised, then refuted)")
-            );
+        for line in &c.straddled {
+            println!("  {} {}", term::yellow("straddled"), term::dim(line));
         }
         println!(
             "  {:<16} refute {}, narrow {}, concede {} of {}",
@@ -430,9 +506,12 @@ async fn bench(
     println!(
         "\n{}",
         term::dim(
-            "recall: planted defects confirmed. decoys: refuted / decisively judged non-defects. \
-             pushback: rebuttals that refuted or narrowed. triage: confirmed findings matching \
-             nothing planted — often real, and worth adding to the case."
+            "recall: planted defects confirmed. pushback: rebuttals that refuted or narrowed — \
+             on its own it measures assertiveness, not accuracy; `cargo test -p locust-core \
+             --test defence_probe -- --ignored` is what measures whether the defence can tell a \
+             true claim from a false one. straddled: one finding described two planted defects, \
+             so only one could be credited. triage: confirmed findings matching nothing planted \
+             — often real, and worth adding to the case."
         )
     );
     Ok(())

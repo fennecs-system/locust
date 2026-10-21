@@ -1,0 +1,15 @@
+# Proves the defects planted in ../head are real, without a model in the loop.
+#
+#   cargo test --manifest-path cases/retry-budget/ground_truth/Cargo.toml
+#
+# These tests assert the *buggy* behaviour on purpose. The fixture keeps its
+# bugs; if one of these starts failing, the fixture changed and the manifest
+# is describing code that no longer exists.
+[package]
+name = "retry-budget-ground-truth"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+retry-budget = { path = "../head" }

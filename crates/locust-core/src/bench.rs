@@ -5,20 +5,24 @@
 //! unmotivated and the panel rubber-stamps — those look identical from the
 //! outside, and no amount of staring at a report distinguishes them.
 //!
-//! A case is a change with a known answer. It plants two kinds of thing:
+//! A case is a change with a known answer: defects a working arena should
+//! confirm. Missing one is a false negative, and the recall figure is the
+//! headline.
 //!
-//! * **real** defects, which a working arena should confirm. Missing one is a
-//!   false negative, and the recall figure is the headline.
-//! * **decoys** — code written to *look* defective and not be. A guard that
-//!   appears missing but is enforced by the caller; an unbounded-looking loop
-//!   bounded by a type. These are the ones that measure the defence. An
-//!   attacker will raise them; a defender that is paying attention refutes
-//!   them, and a confirmed decoy means nobody did.
+//! Findings matching nothing planted are reported as **unclassified** rather
+//! than counted against the run. An unanticipated finding is often a real
+//! defect the case author missed, and scoring it as a false positive would
+//! train the benchmark to reward blandness.
 //!
-//! Findings matching neither are reported as **unclassified** rather than
-//! counted against the run. An unanticipated finding is often a real defect
-//! the case author missed, and scoring it as a false positive would train the
-//! benchmark to reward blandness.
+//! **Decoys used to live here** — code written to *look* defective and not be,
+//! planted so that a defender which refuted them could be told apart from one
+//! that concedes everything. The idea was sound and the delivery was not: six
+//! decoys across three cases drew no reviewer in any live run, so the column
+//! reporting them printed `untested` every time. Known-false claims now reach
+//! the defence directly, as a fixed slate in
+//! `crates/locust-core/tests/defence_probe.rs`, which does not wait for an
+//! attacker to take bait. The measurement survives; the apparatus for hoping
+//! it happens by itself does not.
 
 use crate::model::{Finding, Ruling, Severity, Stance, Verdict};
 use anyhow::{bail, Context, Result};
@@ -29,21 +33,10 @@ use std::path::{Path, PathBuf};
 /// Generous: reviewers cite the symptom where the case author cited the cause.
 const LINE_SLACK: u32 = 25;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DefectKind {
-    /// A genuine defect. The arena should confirm it.
-    Real,
-    /// Written to look like a defect. The arena should refute it, and a
-    /// defender that concedes it is not doing its job.
-    Decoy,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defect {
     pub id: String,
-    pub kind: DefectKind,
     pub file: String,
     /// Inclusive line range the defect lives in, if it has one.
     #[serde(default)]
@@ -56,10 +49,6 @@ pub struct Defect {
     /// too weak: planted defects cluster in the same few functions, so without
     /// this a finding about one would be credited to its neighbour.
     pub matches: Vec<String>,
-    /// Why this is not a defect. Required for decoys, so a case cannot claim
-    /// one without saying what makes it safe.
-    #[serde(default)]
-    pub why_safe: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,9 +86,6 @@ impl Case {
             if d.matches.is_empty() {
                 bail!("defect `{}` has no `matches`; it could never be credited", d.id);
             }
-            if d.kind == DefectKind::Decoy && d.why_safe.trim().is_empty() {
-                bail!("decoy `{}` must say `why_safe`", d.id);
-            }
         }
         Ok(Self { manifest, dir: dir.to_path_buf() })
     }
@@ -121,11 +107,7 @@ impl Case {
     }
 
     pub fn real(&self) -> impl Iterator<Item = &Defect> {
-        self.manifest.defects.iter().filter(|d| d.kind == DefectKind::Real)
-    }
-
-    pub fn decoys(&self) -> impl Iterator<Item = &Defect> {
-        self.manifest.defects.iter().filter(|d| d.kind == DefectKind::Decoy)
+        self.manifest.defects.iter()
     }
 
     /// Build the case into a throwaway git repository: `base/` as the first
@@ -199,8 +181,6 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 pub enum Classified {
     /// Matched a planted defect.
     Real { defect: String },
-    /// Matched something planted to look like a defect and is not.
-    Decoy { defect: String },
     /// Matched nothing in the manifest. Possibly a real defect the case
     /// author missed, so it is reported for triage rather than scored.
     Unclassified,
@@ -238,36 +218,39 @@ fn cluster_consensus(
 /// Quoted evidence is excluded: it may contain unrelated code. Ambiguous
 /// matches are left for human triage rather than settled by manifest order.
 pub fn classify(finding: &Finding, defects: &[Defect]) -> Classified {
+    match matching(finding, defects).as_slice() {
+        [one] => Classified::Real { defect: one.id.clone() },
+        // None, or several: a finding that fits more than one planted defect
+        // needs a human, regardless of manifest order. `Scorecard::build`
+        // reports which entries it straddled rather than discarding that.
+        _ => Classified::Unclassified,
+    }
+}
+
+/// Every planted defect a finding could be describing.
+///
+/// Both the location and the keywords have to agree, for the reasons in
+/// `classify`. Returning the whole set rather than the first hit is what lets
+/// the scorecard say *why* a finding was left unplaced: one that matches two
+/// entries because it names two mechanisms reads very differently from one
+/// that matches nothing, and reporting the second defect as simply "missed"
+/// when a confirmed finding described it is the failure this avoids.
+pub fn matching<'a>(finding: &Finding, defects: &'a [Defect]) -> Vec<&'a Defect> {
     let haystack = format!(
         "{} {} {}",
         finding.raw.title, finding.raw.claim, finding.raw.failure_scenario
     )
     .to_lowercase();
 
-    let mut matched = None;
-    for defect in defects {
-        if normalize(&defect.file) != normalize(&finding.raw.file) {
-            continue;
-        }
-        if let (Some([lo, hi]), Some(line)) = (defect.lines, finding.raw.line) {
-            let within = line + LINE_SLACK >= lo && line <= hi + LINE_SLACK;
-            if !within {
-                continue;
-            }
-        }
-        if !defect.matches.iter().all(|m| haystack.contains(&m.to_lowercase())) {
-            continue;
-        }
-        // Multiple plausible claims need human triage, regardless of manifest order.
-        if matched.is_some() {
-            return Classified::Unclassified;
-        }
-        matched = Some(match defect.kind {
-            DefectKind::Real => Classified::Real { defect: defect.id.clone() },
-            DefectKind::Decoy => Classified::Decoy { defect: defect.id.clone() },
-        });
-    }
-    matched.unwrap_or(Classified::Unclassified)
+    defects
+        .iter()
+        .filter(|defect| normalize(&defect.file) == normalize(&finding.raw.file))
+        .filter(|defect| match (defect.lines, finding.raw.line) {
+            (Some([lo, hi]), Some(line)) => line + LINE_SLACK >= lo && line <= hi + LINE_SLACK,
+            _ => true,
+        })
+        .filter(|defect| defect.matches.iter().all(|m| haystack.contains(&m.to_lowercase())))
+        .collect()
 }
 
 fn normalize(path: &str) -> String {
@@ -282,13 +265,13 @@ pub struct Scorecard {
     /// Planted defects a confirmed finding matched.
     pub real_found: Vec<String>,
     pub real_missed: Vec<String>,
-    pub decoys_planted: usize,
-    /// Decoys the arena confirmed. Every one is a failure of the defence.
-    pub decoys_confirmed: Vec<String>,
-    /// Raised decoys with a refuted ruling and no confirmed ruling.
-    pub decoys_caught: Vec<String>,
     /// Confirmed findings matching nothing planted; need a human to triage.
     pub unclassified: Vec<String>,
+    /// Confirmed findings that described more than one planted defect at once.
+    /// Scoring credits at most one of them, so without this the others read as
+    /// missed even though the run surfaced them.
+    #[serde(default)]
+    pub straddled: Vec<String>,
 
     // --- what the defence actually did ---
     pub rebuttals: usize,
@@ -309,26 +292,6 @@ impl Scorecard {
         ratio(self.real_found.len(), self.real_planted)
     }
 
-    /// Share of decisively judged decoys the arena refuted, or `None` when
-    /// no raised decoy received a confirmed or refuted ruling.
-    ///
-    /// Unraised, unjudged and undecided decoys contribute no evidence of
-    /// resistance and are excluded from both numerator and denominator.
-    pub fn decoy_resistance(&self) -> Option<f64> {
-        let tested = self.decoys_caught.len() + self.decoys_confirmed.len();
-        if tested == 0 {
-            None
-        } else {
-            Some(ratio(self.decoys_caught.len(), tested))
-        }
-    }
-
-    /// Decoys without a decisive ruling, including those nobody raised.
-    pub fn decoys_untested(&self) -> usize {
-        self.decoys_planted
-            .saturating_sub(self.decoys_caught.len() + self.decoys_confirmed.len())
-    }
-
     /// Share of rebuttals that pushed back at all, rather than conceding.
     pub fn defence_pushback(&self) -> f64 {
         ratio(self.refuted_stance + self.narrowed_stance, self.rebuttals)
@@ -338,7 +301,6 @@ impl Scorecard {
         let mut card = Scorecard {
             case: case.manifest.name.clone(),
             real_planted: case.real().count(),
-            decoys_planted: case.decoys().count(),
             elapsed_secs: outcome.elapsed_secs,
             cost_usd: outcome.usage.cost_usd,
             ..Default::default()
@@ -371,6 +333,22 @@ impl Scorecard {
         for (finding, _) in outcome.confirmed_findings() {
             let mut verdict = classify(finding, &case.manifest.defects);
 
+            // A finding can name two planted defects at once — "writes before
+            // the check, and swallows the denial" is one sentence about two
+            // bugs. Only one of them can be credited, so record the straddle:
+            // otherwise the other appears in `real_missed` and the next reader
+            // goes hunting for a reviewer weakness the run does not have.
+            let candidates = matching(finding, &case.manifest.defects);
+            if candidates.len() > 1 {
+                let ids: Vec<&str> = candidates.iter().map(|d| d.id.as_str()).collect();
+                card.straddled.push(format!(
+                    "{} — {} (names {})",
+                    finding.location(),
+                    finding.raw.title,
+                    ids.join(" + ")
+                ));
+            }
+
             // A thorough finding names several mechanisms, so it matches
             // several entries and the ambiguity rule discards it — while the
             // narrower duplicates clustered beneath it each name one defect
@@ -391,11 +369,6 @@ impl Scorecard {
                         card.real_found.push(defect);
                     }
                 }
-                Classified::Decoy { defect } => {
-                    if !card.decoys_confirmed.contains(&defect) {
-                        card.decoys_confirmed.push(defect);
-                    }
-                }
                 Classified::Unclassified => {
                     card.unclassified.push(format!(
                         "{} — {}",
@@ -406,30 +379,20 @@ impl Scorecard {
             }
         }
 
-        // Only a refuted ruling demonstrates rejection. Silence and uncertainty
-        // provide no evidence that the defence caught a false claim.
-        let raised_decoys: Vec<String> = outcome
-            .generations
+        // A defect named by a straddling finding is neither found nor missed:
+        // the run surfaced it, but the credit went to the entry it shared the
+        // finding with. Listing it as missed is how a benchmark sends the next
+        // reader hunting a weakness that is not there.
+        let straddled_ids: Vec<String> = outcome
+            .confirmed_findings()
             .iter()
-            .flat_map(|g| g.findings.iter().filter(|f| {
-                f.is_canonical() && verdict_of(&g.rulings, f)
-                    .is_some_and(|r| r.raw.verdict == Verdict::Refuted)
-            }))
-            .filter_map(|f| match classify(f, &case.manifest.defects) {
-                Classified::Decoy { defect } => Some(defect),
-                _ => None,
-            })
+            .flat_map(|(f, _)| matching(f, &case.manifest.defects))
+            .map(|d| d.id.clone())
             .collect();
-        for id in raised_decoys {
-            if !card.decoys_confirmed.contains(&id) && !card.decoys_caught.contains(&id) {
-                card.decoys_caught.push(id);
-            }
-        }
-
         card.real_missed = case
             .real()
             .map(|d| d.id.clone())
-            .filter(|id| !card.real_found.contains(id))
+            .filter(|id| !card.real_found.contains(id) && !straddled_ids.contains(id))
             .collect();
         card
     }
@@ -459,14 +422,17 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/session-cache");
         let case = Case::load(&root).unwrap();
         let examples = [
-            (43, "size() reads len(self._entries) without the lock, which looks like a data race.",
-                Classified::Decoy { defect: "size-race".into() }),
-            (47, "purge_expired() mutates _entries while iterating it: RuntimeError: dictionary changed size during iteration.",
-                Classified::Decoy { defect: "purge-mutation-during-iteration".into() }),
             (30, "put() evicts another session when updating a key, even though put() holds the lock.",
                 Classified::Real { defect: "put-evicts-on-update".into() }),
             (47, "purge_expired() deletes a refreshed session after taking its stale snapshot.",
                 Classified::Real { defect: "purge-deletes-refreshed-session".into() }),
+            // Known-false claims are probe input now, not manifest entries. The
+            // manifest must leave them unplaced rather than quietly crediting
+            // one to a real defect in the same function.
+            (43, "size() reads len(self._entries) without the lock, which looks like a data race.",
+                Classified::Unclassified),
+            (47, "purge_expired() mutates _entries while iterating it: RuntimeError: dictionary changed size during iteration.",
+                Classified::Unclassified),
         ];
         for (line, text, expected) in examples {
             let mut f = finding("src/cache.py", Some(line), text, "");
@@ -498,16 +464,14 @@ mod tests {
         assert_eq!(classify(&reported, &reversed), expected);
     }
 
-    fn defect(id: &str, kind: DefectKind, file: &str, lines: Option<[u32; 2]>, matches: &[&str]) -> Defect {
+    fn defect(id: &str, file: &str, lines: Option<[u32; 2]>, matches: &[&str]) -> Defect {
         Defect {
             id: id.into(),
-            kind,
             file: file.into(),
             lines,
             severity: Severity::High,
             summary: "s".into(),
             matches: matches.iter().map(|m| m.to_string()).collect(),
-            why_safe: if kind == DefectKind::Decoy { "guarded by caller".into() } else { String::new() },
         }
     }
 
@@ -537,9 +501,67 @@ mod tests {
         }
     }
 
+    /// A reviewer that writes "writes before the check *and* swallows the
+    /// denial" has found two planted defects in one sentence. Only one of them
+    /// can be credited, and the other must not be reported as missed: that is
+    /// how a benchmark sends the next reader hunting a weakness the run does
+    /// not have, which has already happened twice in this project's history.
+    #[test]
+    fn a_finding_describing_two_defects_straddles_rather_than_going_missing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cases/permission-check");
+        let case = Case::load(&root).unwrap();
+
+        // Verbatim from the live run of 20 October 2026.
+        let title = "save_invoice writes before the permission check and ignores Denied";
+        let claim = "save_invoice calls store.write(invoice) before it calls check_permission. \
+                     It then catches any exception and only logs a warning, so a user without \
+                     invoice:write still gets their invoice saved.";
+        let scenario = "check_permission raises Denied('invoice:write'), the `except Exception` \
+                        catches it and logs a warning, and the function returns invoice.id.";
+
+        let outcome: crate::model::RunOutcome = serde_json::from_value(serde_json::json!({
+            "run_id": "t", "started_at": "2026-10-20T00:00:00Z", "base": "main",
+            "target": "change", "vcs": "git", "themes": [], "elapsed_secs": 1.0,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            "generations": [{
+                "generation": 0, "pressure": 1.0, "personas": [], "rebuttals": [], "fitness": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+                "elapsed_secs": 1.0,
+                "findings": [{
+                    "id": "f0-0-0", "generation": 0, "persona": "p", "persona_id": "p",
+                    "provider": "x", "cluster": "f0-0-0", "corroboration": 1,
+                    "grounding": {"status": "verified"}, "file": "src/api.py", "line": 16,
+                    "category": "correctness", "title": title, "claim": claim,
+                    "failure_scenario": scenario, "evidence": "", "severity": "critical",
+                    "altitude": "local", "confidence": 0.9
+                }],
+                "rulings": [{
+                    "finding_id": "f0-0-0", "verdict": "confirmed", "severity": "critical",
+                    "altitude": "local", "reasoning": "r", "novel": true,
+                    "judge_provider": "y", "generation": 0, "panel": [], "dissent": 0.0
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let card = Scorecard::build(&case, &outcome);
+        assert_eq!(card.straddled.len(), 1, "the straddle must be reported: {card:?}");
+        assert!(card.straddled[0].contains("denial-swallowed-in-save-invoice"));
+        assert!(card.straddled[0].contains("write-precedes-the-check"));
+        for id in ["denial-swallowed-in-save-invoice", "write-precedes-the-check"] {
+            assert!(
+                !card.real_missed.contains(&id.to_string()),
+                "`{id}` was described by a confirmed finding, so it is not missed: {:?}",
+                card.real_missed
+            );
+        }
+        // The defects nothing described are still missed.
+        assert!(card.real_missed.contains(&"cache-keyed-on-user-alone".to_string()));
+    }
+
     #[test]
     fn a_finding_matching_location_and_keywords_is_credited() {
-        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
+        let defects = vec![defect("desync", "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
         let f = finding("src/cache.py", Some(22), "expiry leaves _hits populated", "_evict then raises KeyError");
         assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
     }
@@ -548,21 +570,21 @@ mod tests {
     fn location_alone_does_not_credit_a_neighbouring_defect() {
         // Planted defects cluster in the same function; without the keyword
         // requirement each would be credited for the other's discovery.
-        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
+        let defects = vec![defect("desync", "src/cache.py", Some([20, 36]), &["_hits", "KeyError"])];
         let f = finding("src/cache.py", Some(24), "get() mutates shared state without the lock", "a race");
         assert_eq!(classify(&f, &defects), Classified::Unclassified);
     }
 
     #[test]
     fn keywords_alone_do_not_credit_a_finding_in_another_file() {
-        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 36]), &["_hits"])];
+        let defects = vec![defect("desync", "src/cache.py", Some([20, 36]), &["_hits"])];
         let f = finding("src/other.py", Some(22), "_hits is never pruned", "leak");
         assert_eq!(classify(&f, &defects), Classified::Unclassified);
     }
 
     #[test]
     fn a_reviewer_citing_the_symptom_rather_than_the_cause_still_matches() {
-        let defects = vec![defect("desync", DefectKind::Real, "src/cache.py", Some([20, 20]), &["_hits"])];
+        let defects = vec![defect("desync", "src/cache.py", Some([20, 20]), &["_hits"])];
         // 40 lines away is the same defect seen from `_evict`; slack covers it.
         let f = finding("src/cache.py", Some(38), "_hits and _entries disagree", "boom");
         assert_eq!(classify(&f, &defects), Classified::Real { defect: "desync".into() });
@@ -572,22 +594,15 @@ mod tests {
     }
 
     #[test]
-    fn confirming_a_decoy_is_recorded_as_such() {
-        let defects = vec![defect("safe-ttl", DefectKind::Decoy, "src/cache.py", None, &["ttl"])];
-        let f = finding("src/cache.py", Some(9), "ttl default changed", "breaks callers");
-        assert_eq!(classify(&f, &defects), Classified::Decoy { defect: "safe-ttl".into() });
-    }
-
-    #[test]
     fn a_defect_with_no_line_range_matches_anywhere_in_its_file() {
-        let defects = vec![defect("anywhere", DefectKind::Real, "a.rs", None, &["widget"])];
+        let defects = vec![defect("anywhere", "a.rs", None, &["widget"])];
         let f = finding("a.rs", Some(9999), "widget is wrong", "x");
         assert_eq!(classify(&f, &defects), Classified::Real { defect: "anywhere".into() });
     }
 
     #[test]
     fn paths_are_compared_leniently() {
-        let defects = vec![defect("d", DefectKind::Real, "src/cache.py", None, &["x"])];
+        let defects = vec![defect("d", "src/cache.py", None, &["x"])];
         let f = finding("./src/cache.py", None, "x happens", "x");
         assert_eq!(classify(&f, &defects), Classified::Real { defect: "d".into() });
     }
@@ -689,15 +704,13 @@ mod tests {
     fn a_cluster_speaks_for_a_canonical_finding_the_manifest_cannot_place() {
         let ambiguous = Defect {
             id: "ambiguous-neighbour".into(),
-            kind: DefectKind::Real,
             file: "src/cache.py".into(),
             lines: None,
             severity: Severity::High,
             summary: "s".into(),
             matches: vec!["lock".into()],
-            why_safe: String::new(),
         };
-        let desync = defect("desync", DefectKind::Real, "src/cache.py", None, &["_hits", "KeyError"]);
+        let desync = defect("desync", "src/cache.py", None, &["_hits", "KeyError"]);
         let defects = vec![desync, ambiguous];
 
         // Thorough: names the orphan *and* the lock, so it matches both.
@@ -734,8 +747,6 @@ mod tests {
         let card = Scorecard {
             real_planted: 4,
             real_found: vec!["a".into(), "b".into()],
-            decoys_planted: 2,
-            decoys_confirmed: vec!["d1".into()],
             rebuttals: 10,
             refuted_stance: 2,
             narrowed_stance: 1,
@@ -752,22 +763,4 @@ mod tests {
         assert_eq!(empty.defence_pushback(), 0.0);
     }
 
-    /// Observed on the first benchmark run: two decoys were planted, neither
-    /// was raised by any reviewer, and the scorecard reported 2/2 resisted --
-    /// crediting the defence for work it was never asked to do.
-    #[test]
-    fn a_decoy_nobody_raised_is_untested_not_resisted() {
-        let untouched = Scorecard { decoys_planted: 2, ..Default::default() };
-        assert_eq!(untouched.decoy_resistance(), None, "no evidence is not a pass");
-        assert_eq!(untouched.decoys_untested(), 2);
-
-        let tested = Scorecard {
-            decoys_planted: 2,
-            decoys_caught: vec!["a".into()],
-            decoys_confirmed: vec!["b".into()],
-            ..Default::default()
-        };
-        assert_eq!(tested.decoy_resistance(), Some(0.5));
-        assert_eq!(tested.decoys_untested(), 0);
-    }
 }

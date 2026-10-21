@@ -147,29 +147,39 @@ max_themes = 8
 # you nothing. The band around 0.5 is deliberately wide: 0.6 still reads as
 # neutral, so you have to mean it before a judge changes behaviour.
 #
-# The default panel is three contrasting temperaments, below. A finding all three
-# confirm cleared three different bars; one only `stickler` confirms is a nitpick;
-# one only `pragmatist` refuted may be worth a second look. That spread is the
-# whole reason to run more than one judge, and it is reported under 'Where the
-# panel split'. Delete two of these to go back to a single judge and a third of
-# the judging cost.
+# The default is ONE judge with no temperament. The three-temperament panel below
+# is the alternative: a finding all three confirm cleared three different bars;
+# one only `stickler` confirms is a nitpick; one only `pragmatist` refuted is
+# worth a second look. That spread is reported under 'Where the panel split'.
+#
+# It is commented out because it has not been shown to pay for itself. On the
+# session-cache benchmark slate, with the defence scripted so both arms saw
+# byte-identical input, the panel and a single judge returned the same verdict on
+# 7 of 7 claims. The panel split once -- on whether an unvalidated max_entries=0
+# is a defect or invalid-input hardening -- and the plurality verdict matched the
+# single judge anyway. Judging is a third of a run's calls, so three judges is
+# three times that for no measured change in outcome.
+#
+# Uncomment all three if you want dissent reported. Dissent is the only evidence
+# that a confirmation cleared more than one standard of proof, and
+# `consensus_weight` below scores a contested confirmation under a unanimous one.
 #
 # Presets: neutral, stickler, pragmatist, architect, paranoid, skeptic, advocate.
 
 # audits every claim, wants the evidence quoted, assumes the reviewer is wrong
-[[judge]]
-name = "stickler"
-preset = "stickler"
+# [[judge]]
+# name = "stickler"
+# preset = "stickler"
 
 # asks whether anyone will actually be hurt; deflates hypotheticals
-[[judge]]
-name = "pragmatist"
-preset = "pragmatist"
+# [[judge]]
+# name = "pragmatist"
+# preset = "pragmatist"
 
 # will confirm a structural claim on the strength of the argument alone
-[[judge]]
-name = "architect"
-preset = "architect"
+# [[judge]]
+# name = "architect"
+# preset = "architect"
 
 # Override individual axes on top of a preset, or skip the preset entirely.
 # `provider` pins a judge to one model; left unset, judges rotate across providers

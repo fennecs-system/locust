@@ -1,3 +1,5 @@
 /target
 .locust/
 /locust-review-handoff.md
+cases/*/ground_truth/target/
+cases/*/ground_truth/Cargo.lock

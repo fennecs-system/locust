@@ -6,6 +6,10 @@ members = [
     "crates/locust-provider",
     "crates/locust-vcs",
 ]
+# Benchmark fixtures. `cases/retry-budget` is a real crate so its planted
+# defects can be proved by running them, but it is deliberately broken code and
+# must never be built by `cargo test --workspace`.
+exclude = ["cases"]
 
 [workspace.package]
 version = "0.1.0"

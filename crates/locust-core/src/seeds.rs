@@ -256,16 +256,28 @@ fn build(seed: &Seed, role: Role) -> Persona {
 /// of the argument alone. A finding all three confirm has cleared three
 /// genuinely different bars. A finding only one confirms tells you which bar it
 /// cleared, which is more useful than a bare verdict.
+/// The judging panel when the config declares none: one judge, no temperament.
+///
+/// It used to be three contrasting temperaments. The spread they produce is
+/// real — see `locust judges` — but it was never shown to change an outcome,
+/// and judging is a third of a run's calls. Measured on the `session-cache`
+/// slate (`tests/defence_probe.rs`), a panel of stickler/pragmatist/architect
+/// and a single neutral judge returned the same verdict on 7 of 7 claims. The
+/// panel split once, on a claim whose answer is a judgement call, and the
+/// split did not move the verdict.
+///
+/// So the default is one judge and the panel is opt-in: declare `[[judge]]`
+/// entries in `locust.toml` and you get it back, with `consensus_weight`
+/// scoring contested confirmations below unanimous ones. What a single judge
+/// cannot give you is dissent, and dissent is the only evidence that a
+/// confirmation cleared more than one standard of proof.
 pub fn default_panel() -> Vec<Judge> {
-    ["stickler", "pragmatist", "architect"]
-        .into_iter()
-        .map(|name| Judge {
-            name: name.to_string(),
-            traits: Traits::preset(name).expect("built-in preset"),
-            provider: None,
-            weight: 1.0,
-        })
-        .collect()
+    vec![Judge {
+        name: "judge".to_string(),
+        traits: Traits::NEUTRAL,
+        provider: None,
+        weight: 1.0,
+    }]
 }
 
 pub fn library(role: Role) -> Vec<Persona> {

@@ -1,0 +1,70 @@
+name = "permission-check"
+language = "python"
+description = "Replaces a boolean permission predicate with one that raises, adds a per-request cache."
+
+notes = """
+A small invoicing service. Handlers run under sync workers: one request is in
+flight per process at a time, so module-level per-request state is deliberate
+here. `middleware.finish()` is wired into the request teardown hook and runs
+after every request, successful or not.
+
+Defects in this case tend to live at the *callers* of the changed function
+rather than inside it, and three files move together.
+"""
+
+[[defect]]
+id = "middleware-treats-raiser-as-predicate"
+file = "src/middleware.py"
+lines = [6, 10]
+severity = "critical"
+summary = """
+check_permission() returns None and signals refusal by raising, but authorize()
+still tests its return value. `not None` is True, so every permitted request is
+answered 403 — and a genuinely unauthorised one raises Denied out of the
+middleware instead of being refused, which is a 500.
+"""
+matches = ["authorize", "none"]
+
+[[defect]]
+id = "denial-swallowed-in-save-invoice"
+file = "src/api.py"
+lines = [14, 20]
+severity = "critical"
+summary = """
+save_invoice() wraps the check in `except Exception` and only logs, so Denied
+is discarded and the call returns normally. Any user who can reach the endpoint
+can write an invoice.
+"""
+matches = ["except exception"]
+
+[[defect]]
+id = "write-precedes-the-check"
+file = "src/api.py"
+lines = [14, 19]
+severity = "high"
+summary = """
+store.write(invoice) runs before the permission check instead of after it. Even
+if the denial were propagated, the invoice would already be persisted, so the
+check cannot prevent the write it guards.
+"""
+matches = ["store.write", "before"]
+
+[[defect]]
+id = "cache-keyed-on-user-alone"
+file = "src/permissions.py"
+lines = [23, 31]
+severity = "critical"
+summary = """
+The cache is keyed on user.id and ignores the permission being asked about, so
+the first answer for a user is reused for every later permission in that
+request. A viewer whose invoice:read check succeeds then passes user:manage.
+"""
+matches = ["cache", "key"]
+
+# Two further claims about this change are *false* and are deliberately not
+# planted here: that the permission cache is never invalidated (it is, from
+# `middleware.finish()`, which the request teardown hook runs), and that the
+# `requires` decorator drops the handler's return value (it returns it). They
+# are probe input, not manifest entries — see
+# `crates/locust-core/tests/defence_probe.rs` and the decoy tests in
+# `test_ground_truth.py`, which prove both are safe.

@@ -271,12 +271,19 @@ fn render(found: &Detected) -> String {
          # you nothing. The band around 0.5 is deliberately wide: 0.6 still reads as\n\
          # neutral, so you have to mean it before a judge changes behaviour.\n\
          #\n\
-         # The default panel is three contrasting temperaments, below. A finding all three\n\
-         # confirm cleared three different bars; one only `stickler` confirms is a nitpick;\n\
-         # one only `pragmatist` refuted may be worth a second look. That spread is the\n\
-         # whole reason to run more than one judge, and it is reported under 'Where the\n\
-         # panel split'. Delete two of these to go back to a single judge and a third of\n\
-         # the judging cost.\n\
+         # The default is ONE judge with no temperament, and judging is a third of a\n\
+         # run's calls. The three-temperament panel below is the alternative: a finding\n\
+         # all three confirm cleared three different bars; one only `stickler` confirms\n\
+         # is a nitpick; one only `pragmatist` refuted is worth a second look. That\n\
+         # spread is the whole reason to run more than one judge, and it is reported\n\
+         # under 'Where the panel split'.\n\
+         #\n\
+         # It is commented out because it has not been shown to pay for itself. On the\n\
+         # `session-cache` benchmark slate the panel and a single judge returned the same\n\
+         # verdict on 7 of 7 claims; the panel split once, on a claim that is a judgement\n\
+         # call either way, and the split did not move the verdict. Uncomment all three if\n\
+         # you want dissent reported -- it is the only evidence that a confirmation cleared\n\
+         # more than one standard of proof -- and expect to pay three times for judging.\n\
          #\n\
          # Presets: neutral, stickler, pragmatist, architect, paranoid, skeptic, advocate.\n\n",
     );
@@ -286,7 +293,7 @@ fn render(found: &Detected) -> String {
         ("pragmatist", "asks whether anyone will actually be hurt; deflates hypotheticals"),
         ("architect", "will confirm a structural claim on the strength of the argument alone"),
     ] {
-        let _ = writeln!(s, "# {note}\n[[judge]]\nname = \"{name}\"\npreset = \"{name}\"\n");
+        let _ = writeln!(s, "# {note}\n# [[judge]]\n# name = \"{name}\"\n# preset = \"{name}\"\n");
     }
 
     s.push_str(

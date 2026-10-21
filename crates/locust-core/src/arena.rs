@@ -399,12 +399,18 @@ impl Arena {
             ));
         }
 
-        if self.panel.len() == 1 {
-            out.push(
-                "a single judge: its verdict is final and there is no disagreement to measure. \
-                 `consensus_weight` and the panel-split report do nothing"
-                    .to_string(),
-            );
+        // One judge is the default, so this is only worth saying when the
+        // config has also tuned a setting that a single judge makes inert.
+        // Warning on every default run would train people to ignore warnings.
+        if self.panel.len() == 1
+            && self.cfg.scoring.consensus_weight
+                != crate::config::ScoringConfig::default().consensus_weight
+        {
+            out.push(format!(
+                "`[scoring] consensus_weight = {}` does nothing with a single judge: there is \
+                 no dissent to scale by. Declare more than one `[[judge]]` or leave it unset",
+                self.cfg.scoring.consensus_weight
+            ));
         }
 
         out
