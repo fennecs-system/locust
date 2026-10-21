@@ -1,0 +1,94 @@
+# CI for the locust workspace.
+#
+# TEMPORARY: the gates below run on pushes to `main` because that is where work
+# currently lands directly. This is a stopgap. Once the project stabilises and
+# work moves onto feature branches, gating should happen on pull requests and
+# `main` should be a protected branch, leaving this workflow to do little more
+# than build and upload artifacts for commits that are already green.
+#
+# `cargo fmt --all -- --check` is deliberately NOT a gate yet: the tree is not
+# rustfmt-clean (27 tracked files differ under stable rustfmt 1.99). Add the
+# gate in the same commit that reformats the codebase, not before.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gates (clippy + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Live-model tests are marked `#[ignore]` and must stay ignored here:
+      # do not add `--include-ignored`, it would spend real model quota.
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  release-build:
+    name: Release build (${{ matrix.artifact }})
+    needs: gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: locust-linux-x86_64
+          - os: macos-latest
+            artifact: locust-macos-aarch64
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build
+        run: cargo build --release --locked -p locust-cli
+
+      # macOS `strip` re-applies the ad-hoc linker signature, so the arm64
+      # binary still runs after stripping.
+      - name: Strip
+        run: strip target/release/locust
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/locust
+          if-no-files-found: error
+          retention-days: 14
